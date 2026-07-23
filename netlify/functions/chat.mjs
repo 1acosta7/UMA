@@ -144,7 +144,7 @@ export default async function handler(req) {
     });
   }
 
-  const { profile } = await req.json();
+  const { profile, debug } = await req.json();
   if (!profile?.trim()) {
     return new Response(JSON.stringify({ error: "Client profile is required" }), {
       status: 400, headers: { ...CORS, "Content-Type": "application/json" },
@@ -212,6 +212,15 @@ export default async function handler(req) {
     }
     carrierStatus[carrier] = anyMatched ? "matched" : "uploaded";
     docSections.push(`\n\n=== ${name.toUpperCase()} ===\n${parts.join("\n\n")}`);
+  }
+
+  // Temporary diagnostic path: return the exact assembled context instead of
+  // calling the model, so we can inspect what extractRelevant actually pulled
+  // for a given carrier/product without burning an API call.
+  if (debug) {
+    return new Response(JSON.stringify({ keywords, carrierStatus, docSections }), {
+      status: 200, headers: { ...CORS, "Content-Type": "application/json" },
+    });
   }
 
   // Step 3: analysis -- always claude-sonnet-5, no fallback to a cheaper model.
