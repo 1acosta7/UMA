@@ -156,7 +156,7 @@ export default async function handler(req) {
           },
           body: JSON.stringify({
             model: "claude-opus-4-5",
-            max_tokens: 3072,
+            max_tokens: 8000,
             system: ANSWER_SYSTEM,
             messages,
             stream: true,
