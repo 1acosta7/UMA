@@ -8,7 +8,7 @@ const CORS = {
 };
 
 const ROUTING_SYSTEM = `You are an insurance underwriting router. Select the best carrier(s) and document slot(s).
-Routing logic: Health impairments → impairment guides. Non-med/exam-free → exam_free, accel_uw, nonmed. Final expense → fe_express, planright. Term life → trendsetter, main_uw. IUL/LIRP → uw_pathways, ffiul_ii. Whole life/IBC → main_uw, main_uw_apr26. Foreign nationals → foreign_nat, immigration. Diabetes → diabetes. Military → natguard, afge. Athletes → athletes. APS → aps. Large face amounts → uw_financial.
+Routing logic: Health impairments → impairment guides. Non-med/exam-free → exam_free, accel_uw, nonmed. Final expense → fe_express, planright. Term life → trendsetter, main_uw. IUL/LIRP → uw_pathways, ffiul_ii, fciul_ii. Whole life/IBC → main_uw, main_uw_apr26. Foreign nationals → foreign_nat, immigration. Diabetes → diabetes. Military → natguard, afge. Athletes → athletes. APS → aps. Large face amounts → uw_financial.
 Return JSON only: {"r":[{"c":"carrier_id","s":["slot_id"],"note":"reason"}]}
 Max 2 carriers, max 2 slots each.`;
 
