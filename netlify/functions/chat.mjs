@@ -133,16 +133,69 @@ export default async function handler(req) {
     ? `<documents>${docBlocks.join("")}\n</documents>`
     : "<documents>No documents have been uploaded yet.</documents>";
 
-  // Step 3: Answer
+  // Step 3: Answer — streamed as SSE so long multi-carrier comparisons
+  // aren't cut off by the platform's synchronous function time limit.
   const messages = [
     ...history.slice(-8),
     { role: "user", content: `${question}\n\n${contextBlock}` },
   ];
 
-  const reply = await callAnthropic(ANSWER_SYSTEM, messages, 3072);
+  const encoder = new TextEncoder();
+  const sse = (event, data) => encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
-  return new Response(JSON.stringify({ reply, routing, searched }), {
+  const stream = new ReadableStream({
+    async start(controller) {
+      controller.enqueue(sse("meta", { routing, searched }));
+      try {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "x-api-key": Netlify.env.get("ANTHROPIC_API_KEY"),
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "claude-opus-4-5",
+            max_tokens: 3072,
+            system: ANSWER_SYSTEM,
+            messages,
+            stream: true,
+          }),
+        });
+        if (!res.ok || !res.body) {
+          controller.enqueue(sse("error", { error: `Anthropic error: ${res.status}` }));
+          controller.close();
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const events = buf.split("\n\n");
+          buf = events.pop();
+          for (const evt of events) {
+            const dataLine = evt.split("\n").find((l) => l.startsWith("data: "));
+            if (!dataLine) continue;
+            try {
+              const parsed = JSON.parse(dataLine.slice(6));
+              if (parsed.type === "content_block_delta" && parsed.delta?.type === "text_delta") {
+                controller.enqueue(sse("delta", { text: parsed.delta.text }));
+              }
+            } catch { /* ignore partial/non-JSON lines */ }
+          }
+        }
+      } catch (err) {
+        controller.enqueue(sse("error", { error: err.message }));
+      }
+      controller.close();
+    },
+  });
+
+  return new Response(stream, {
     status: 200,
-    headers: { ...CORS, "Content-Type": "application/json" },
+    headers: { ...CORS, "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
   });
 }

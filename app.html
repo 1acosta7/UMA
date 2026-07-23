@@ -406,28 +406,59 @@ async function send() {
     });
     if (res.status === 401) { await doSignOut(); return; }
     if (!res.ok) throw new Error('Request failed');
-    const data = await res.json();
-    const { reply, routing = [] } = data;
-    bubble.innerHTML = '';
-    if (routing.length > 0) {
-      const pills = document.createElement('div');
-      pills.className = 'pills';
-      routing.forEach(r => {
-        const ci = CARRIERS[r.c];
-        if (!ci) return;
-        const p = document.createElement('span');
-        p.className = 'pill';
-        p.style.cssText = `color:${ci.color};border-color:${ci.color}22;background:${ci.color}14`;
-        p.innerHTML = `<span class="pdot" style="background:${ci.color}"></span>${esc(ci.name)}`;
-        pills.appendChild(p);
-      });
-      bubble.appendChild(pills);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', replyText = '', bodyBuilt = false, txt = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const events = buf.split('\n\n');
+      buf = events.pop();
+      for (const evt of events) {
+        let eventType = 'message', dataStr = '';
+        for (const line of evt.split('\n')) {
+          if (line.startsWith('event: ')) eventType = line.slice(7);
+          else if (line.startsWith('data: ')) dataStr = line.slice(6);
+        }
+        if (!dataStr) continue;
+        let data;
+        try { data = JSON.parse(dataStr); } catch { continue; }
+
+        if (eventType === 'meta') {
+          bubble.innerHTML = '';
+          const routing = data.routing || [];
+          if (routing.length > 0) {
+            const pills = document.createElement('div');
+            pills.className = 'pills';
+            routing.forEach(r => {
+              const ci = CARRIERS[r.c];
+              if (!ci) return;
+              const p = document.createElement('span');
+              p.className = 'pill';
+              p.style.cssText = `color:${ci.color};border-color:${ci.color}22;background:${ci.color}14`;
+              p.innerHTML = `<span class="pdot" style="background:${ci.color}"></span>${esc(ci.name)}`;
+              pills.appendChild(p);
+            });
+            bubble.appendChild(pills);
+          }
+          txt = document.createElement('div');
+          bubble.appendChild(txt);
+          bodyBuilt = true;
+        } else if (eventType === 'delta') {
+          replyText += data.text;
+          if (txt) txt.innerHTML = renderMd(replyText);
+          scrollB();
+        } else if (eventType === 'error') {
+          throw new Error(data.error || 'Stream error');
+        }
+      }
     }
-    const txt = document.createElement('div');
-    txt.innerHTML = renderMd(reply);
-    bubble.appendChild(txt);
+    if (!bodyBuilt) throw new Error('Empty response');
     history.push({ role: 'user', content: q });
-    history.push({ role: 'assistant', content: reply });
+    history.push({ role: 'assistant', content: replyText });
   } catch (err) {
     bubble.innerHTML =
       `<span style="color:#E85D2F"><i class="ti ti-alert-circle"></i> ${esc(err.message)}</span>`;
