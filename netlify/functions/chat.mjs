@@ -18,10 +18,54 @@ If the question asks broadly which carrier(s) to use, asks to compare carriers/o
 
 For a narrow question about one specific product or carrier already named by the user, max 2 carriers, max 2 slots each.
 
-Return JSON only: {"r":[{"c":"carrier_id","s":["slot_id"],"note":"reason"}]}`;
+Also extract "kw": 3-8 short search terms/phrases for the specific medical conditions, impairments, or product features named in the question — in the plain terminology a carrier's underwriting guide would use (e.g. for a TIA case: "TIA", "transient ischemic attack", "stroke", "CVA"). These are used to find the relevant page in each document, not to describe the client generally — do not include age/gender/budget as keywords.
+
+Return JSON only: {"r":[{"c":"carrier_id","s":["slot_id"],"note":"reason"}],"kw":["term1","term2"]}`;
 
 const ANSWER_SYSTEM = `You are a professional insurance underwriting assistant. Answer based ONLY on provided documents. Lead with direct answer. Cite exact document and page/section if visible. Give precise numbers — face amounts, age bands, table ratings, flat extras. Note exceptions.
 When a carrier has both a simplified-issue (SI) chart and a fully-underwritten guide in the provided documents, check BOTH and present whichever gives the client the fastest/most favorable outcome — don't default to only the fully-underwritten answer if the SI product is more favorable. When comparing across carriers, rank recommendations with the best/fastest option first. If not found, say so.`;
+
+// Instead of blindly slicing the first N characters of a document (which can
+// cut off before the relevant decision-chart entry, especially in long SI
+// medication/condition tables), pull windows of text around keyword matches
+// wherever they occur, plus a short head for general context.
+function extractRelevant(text, keywords, maxTotal) {
+  const head = text.slice(0, 1000);
+  if (!keywords?.length) return text.slice(0, maxTotal);
+
+  const windows = [];
+  for (const kw of keywords) {
+    const needle = kw.trim();
+    if (!needle) continue;
+    // Word-boundary match — a plain substring search would match "TIA" inside
+    // "essential", "substantial", "differentiate", etc.
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`\\b${escaped}\\b`, "gi");
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      windows.push([Math.max(0, m.index - 1200), Math.min(text.length, m.index + needle.length + 1800)]);
+    }
+  }
+  if (windows.length === 0) return text.slice(0, maxTotal);
+
+  windows.sort((a, b) => a[0] - b[0]);
+  const merged = [windows[0]];
+  for (const [start, end] of windows.slice(1)) {
+    const last = merged[merged.length - 1];
+    if (start <= last[1] + 200) last[1] = Math.max(last[1], end);
+    else merged.push([start, end]);
+  }
+
+  let out = merged[0][0] > 0 ? head + "\n...\n" : "";
+  let used = out.length;
+  for (const [start, end] of merged) {
+    if (used >= maxTotal) break;
+    const chunk = text.slice(start, end);
+    out += (out ? "\n...\n" : "") + chunk;
+    used += chunk.length;
+  }
+  return out.slice(0, maxTotal);
+}
 
 async function checkAuth(authHeader) {
   const token = (authHeader || "").replace("Bearer ", "").trim();
@@ -78,6 +122,7 @@ export default async function handler(req) {
 
   // Step 1: Route
   let routing = [];
+  let keywords = [];
   try {
     const routeText = await callAnthropic(
       ROUTING_SYSTEM,
@@ -87,6 +132,7 @@ export default async function handler(req) {
     );
     const parsed = JSON.parse(routeText.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
     routing = parsed.r ?? [];
+    keywords = parsed.kw ?? [];
   } catch {
     routing = [];
   }
@@ -96,7 +142,7 @@ export default async function handler(req) {
   const docBlocks = [];
 
   const totalSlots = routing.reduce((n, r) => n + (r.s?.length ?? 0), 0);
-  const perDocLimit = Math.min(30000, Math.max(8000, Math.floor(60000 / Math.max(1, totalSlots))));
+  const perDocLimit = Math.min(25000, Math.max(10000, Math.floor(100000 / Math.max(1, totalSlots))));
 
   for (const route of routing) {
     const carrier = route.c;
@@ -107,7 +153,7 @@ export default async function handler(req) {
         const blob = await store.get(key, { type: "text" });
         if (blob) {
           searched.push(key);
-          docBlocks.push(`\n\n=== ${carrier.toUpperCase()} / ${slotId} ===\n${blob.slice(0, perDocLimit)}`);
+          docBlocks.push(`\n\n=== ${carrier.toUpperCase()} / ${slotId} ===\n${extractRelevant(blob, keywords, perDocLimit)}`);
         }
       } catch { /* not uploaded yet */ }
     }
@@ -122,7 +168,7 @@ export default async function handler(req) {
           const blob = await store.get(b.key, { type: "text" });
           if (blob) {
             searched.push(b.key);
-            docBlocks.push(`\n\n=== ${b.key} ===\n${blob.slice(0, 30000)}`);
+            docBlocks.push(`\n\n=== ${b.key} ===\n${extractRelevant(blob, keywords, 20000)}`);
           }
         } catch { /* skip */ }
       }
