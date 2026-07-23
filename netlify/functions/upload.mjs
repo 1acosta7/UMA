@@ -31,8 +31,8 @@ export default async function handler(req) {
 
   // Decode base64 and extract text (store as text for AI retrieval)
   const buf = Buffer.from(data, "base64");
-  if (buf.byteLength > 5 * 1024 * 1024) {
-    return new Response(JSON.stringify({ error: "File exceeds 5 MB limit" }), {
+  if (buf.byteLength > 4.5 * 1024 * 1024) {
+    return new Response(JSON.stringify({ error: "File exceeds 4.5 MB limit" }), {
       status: 400, headers: { ...CORS, "Content-Type": "application/json" },
     });
   }

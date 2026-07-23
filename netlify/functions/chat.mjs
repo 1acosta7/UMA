@@ -1,4 +1,5 @@
 import { getStore } from "@netlify/blobs";
+import { verifyToken } from "@clerk/backend";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -13,18 +14,10 @@ Max 2 carriers, max 2 slots each.`;
 
 const ANSWER_SYSTEM = `You are a professional insurance underwriting assistant. Answer based ONLY on provided documents. Lead with direct answer. Cite exact document. Give precise numbers — face amounts, age bands, table ratings, flat extras. Note exceptions. If not found, say so.`;
 
-async function verifyToken(authHeader) {
+async function checkAuth(authHeader) {
   const token = (authHeader || "").replace("Bearer ", "").trim();
   if (!token) throw new Error("Missing token");
-  const res = await fetch("https://api.clerk.com/v1/tokens/verify", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${Netlify.env.get("CLERK_SECRET_KEY")}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ token }),
-  });
-  if (!res.ok) throw new Error("Invalid token");
+  await verifyToken(token, { secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
 }
 
 async function callAnthropic(system, messages, maxTokens = 256) {
@@ -52,7 +45,7 @@ export default async function handler(req) {
 
   // Auth
   try {
-    await verifyToken(req.headers.get("authorization"));
+    await checkAuth(req.headers.get("authorization"));
   } catch {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401, headers: { ...CORS, "Content-Type": "application/json" },

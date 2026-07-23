@@ -6,7 +6,7 @@
   <title>Uma — Underwriting Tool</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3/dist/tabler-icons.min.css" />
   <script
-    src="https://clerk.askuma.io/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
+    src="https://clerk.askuma.io/npm/@clerk/clerk-js@6.25.6/dist/clerk.browser.js"
     data-clerk-publishable-key="pk_live_Y2xlcmsuYXNrdW1hLmlvJA"
     crossorigin="anonymous">
   </script>
@@ -524,7 +524,7 @@ function trigUp(cid, sid) { document.getElementById(`fi-${cid}-${sid}`)?.click()
 async function doUp(e, cid, sid) {
   const file = e.target.files?.[0]; e.target.value = '';
   if (!file) return;
-  if (file.size > 5*1024*1024) { toast('File exceeds 5 MB limit','err'); return; }
+  if (file.size > 4.5*1024*1024) { toast('File exceeds 4.5 MB limit','err'); return; }
   toast('Uploading…','info');
   try {
     const b64 = await toB64(file);

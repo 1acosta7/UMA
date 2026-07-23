@@ -2,6 +2,7 @@
   "name": "uma",
   "version": "1.0.0",
   "dependencies": {
-    "@netlify/blobs": "^8.1.0"
+    "@netlify/blobs": "^8.1.0",
+    "@clerk/backend": "^3.12.0"
   }
 }

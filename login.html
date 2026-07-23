@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sign In — Uma</title>
 <script
-  src="https://clerk.askuma.io/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
+  src="https://clerk.askuma.io/npm/@clerk/clerk-js@6.25.6/dist/clerk.browser.js"
   data-clerk-publishable-key="pk_live_Y2xlcmsuYXNrdW1hLmlvJA"
   crossorigin="anonymous">
 </script>
@@ -41,7 +41,9 @@ window.addEventListener('load', async function() {
         }
       },
       afterSignInUrl: '/app.html',
-      afterSignUpUrl: '/app.html'
+      afterSignUpUrl: '/app.html',
+      fallbackRedirectUrl: '/app.html',
+      signUpFallbackRedirectUrl: '/app.html'
     });
   } catch(e) {
     console.error('Clerk error:', e);
