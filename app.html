@@ -21,9 +21,7 @@
     html, body { height: 100%; background: var(--bg); color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       font-size: 15px; overflow: hidden; }
-    /* ── Shell ── */
     .shell { display: flex; flex-direction: column; height: 100vh; }
-    /* ── Header ── */
     header {
       height: var(--hh); display: flex; align-items: center;
       justify-content: space-between; padding: 0 1.5rem;
@@ -51,7 +49,6 @@
       color: var(--muted); border: 1px solid var(--border); transition: all .15s;
     }
     .btn-so:hover { color: var(--text); border-color: var(--border2); }
-    /* ── Tabs ── */
     .tabs {
       height: var(--th); display: flex; align-items: center;
       padding: 0 1.5rem; gap: .2rem;
@@ -65,13 +62,10 @@
     }
     .tab:hover { color: var(--text); background: rgba(255,255,255,.04); }
     .tab.active { color: var(--accent); background: rgba(55,138,221,.1); border-color: rgba(55,138,221,.25); }
-    /* ── Panels ── */
     .panels { flex: 1; min-height: 0; position: relative; }
     .panel { position: absolute; inset: 0; display: none; flex-direction: column; }
     .panel.active { display: flex; }
-    /* ══ SEARCH TAB ══ */
     .messages { flex: 1; min-height: 0; overflow-y: auto; padding: 1.5rem; scroll-behavior: smooth; }
-    /* Empty state */
     .empty {
       display: flex; flex-direction: column; align-items: center;
       justify-content: center; text-align: center; padding: 3rem 1.5rem; min-height: 100%;
@@ -91,7 +85,6 @@
       font-size: .86rem; text-align: left; cursor: pointer; transition: all .15s; line-height: 1.4;
     }
     .ex-btn:hover { border-color: rgba(55,138,221,.35); background: rgba(55,138,221,.06); }
-    /* Messages */
     .msg { display: flex; margin-bottom: 1.1rem; }
     .msg.user { justify-content: flex-end; }
     .bubble {
@@ -103,7 +96,6 @@
       background: var(--surface); border: 1px solid var(--border);
       border-bottom-left-radius: 4px;
     }
-    /* Source pills */
     .pills { display: flex; flex-wrap: wrap; gap: .35rem; margin-bottom: .65rem; }
     .pill {
       display: inline-flex; align-items: center; gap: .3rem;
@@ -111,7 +103,6 @@
       font-weight: 600; border: 1px solid;
     }
     .pdot { width: 6px; height: 6px; border-radius: 50%; }
-    /* Loading states */
     .load-row { display: flex; align-items: center; gap: .45rem; font-size: .83rem; color: var(--muted); }
     .spin {
       width: 13px; height: 13px; border: 2px solid rgba(55,138,221,.2);
@@ -124,7 +115,6 @@
       display: inline-flex; align-items: center; gap: .3rem;
       padding: .14rem .55rem; border-radius: 999px; font-size: .72rem; font-weight: 700; color: #fff;
     }
-    /* Input */
     .input-area {
       flex-shrink: 0; padding: .9rem 1.5rem 1.1rem;
       background: var(--surface); border-top: 1px solid var(--border);
@@ -159,7 +149,6 @@
       align-items: center; gap: .28rem; transition: color .15s;
     }
     .new-chat:hover { color: var(--text); }
-    /* ══ SETUP TAB ══ */
     #panel-setup { overflow-y: auto; }
     .setup-wrap { padding: 2rem 1.5rem; max-width: 820px; width: 100%; margin: 0 auto; }
     .setup-hd { margin-bottom: 1.75rem; }
@@ -201,7 +190,6 @@
     .sbtn.up:hover { background: rgba(55,138,221,.08); }
     .sbtn.del:hover { color: #E85D2F; border-color: rgba(232,93,47,.4); background: rgba(232,93,47,.06); }
     input[type=file] { display: none; }
-    /* ── PIN Modal ── */
     .overlay {
       position: fixed; inset: 0; background: rgba(0,0,0,.72);
       backdrop-filter: blur(4px); z-index: 200;
@@ -227,7 +215,6 @@
       color: #fff; font-size: .9rem; font-weight: 700; cursor: pointer; border: none; transition: all .15s;
     }
     .pin-btn:hover { background: #4A9BE8; }
-    /* ── Toasts ── */
     #toasts {
       position: fixed; bottom: 1.4rem; right: 1.4rem; z-index: 300;
       display: flex; flex-direction: column; gap: .45rem; pointer-events: none;
@@ -242,7 +229,6 @@
     .toast.err { background: #CC3328; }
     .toast.info { background: #378ADD; }
     @keyframes tin { from { opacity:0; transform:translateX(16px); } to { opacity:1; transform:none; } }
-    /* ── Auth screen ── */
     .auth-screen {
       position: fixed; inset: 0; background: var(--bg); z-index: 999;
       display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem;
@@ -261,16 +247,13 @@
 </head>
 <body>
 
-<!-- Auth loading -->
 <div class="auth-screen" id="auth-screen">
   <div class="spin-lg"></div>
   <p>Loading Uma…</p>
 </div>
 
-<!-- Toasts -->
 <div id="toasts"></div>
 
-<!-- PIN Modal -->
 <div class="overlay" id="pin-modal" style="display:none">
   <div class="modal">
     <h3><i class="ti ti-lock"></i> Setup Access</h3>
@@ -281,7 +264,6 @@
   </div>
 </div>
 
-<!-- App -->
 <div class="shell" id="app" style="display:none">
   <header>
     <span class="logo">uma</span>
@@ -298,7 +280,6 @@
   </div>
 
   <div class="panels">
-    <!-- Search -->
     <div class="panel active" id="panel-search">
       <div class="messages" id="messages">
         <div class="empty" id="empty">
@@ -325,7 +306,6 @@
       </div>
     </div>
 
-    <!-- Setup -->
     <div class="panel" id="panel-setup">
       <div class="setup-wrap">
         <div class="setup-hd">
@@ -341,7 +321,6 @@
 </div>
 
 <script>
-// ── Carrier config ──────────────────────────────────────────────────────────
 const CARRIERS = {
   fg:{name:"F&G",color:"#E85D2F",slots:[{id:"telephone_uw",label:"Life UW Telephone Interview Guide",num:"ADV4620"},{id:"exam_free",label:"Exam-Free Underwriting Guide",num:"ADV2493"},{id:"impairment",label:"Impairment Field UW Guide",num:"ADV5544"},{id:"afge",label:"AFGE Field UW Guide",num:"ADV5620"},{id:"natguard",label:"National Guard Field UW Guide",num:"ADV5601"},{id:"foreign_nat",label:"Foreign National UW Categories",num:"ADV1176"}]},
   foresters:{name:"Foresters",color:"#1B9E5E",slots:[{id:"main_uw",label:"Main UW Guide (Your Term, SF, Adv Plus II, SMART UL)"},{id:"main_uw_apr26",label:"Main UW Guide — Apr 2026 Edition"},{id:"accel_uw",label:"Accelerated UW Program Guide"},{id:"nonmed",label:"Non-Med Platform Worksheet"},{id:"diabetes",label:"Diabetes Ratings for Non-Med Business"},{id:"immigration",label:"Immigration Guidelines for Non-US Citizens"},{id:"brightfuture",label:"BrightFuture Children's WL UW Guide"},{id:"planright",label:"PlanRight Medical Reference Guide"}]},
@@ -349,10 +328,8 @@ const CARRIERS = {
   transamerica:{name:"Transamerica",color:"#CC3328",slots:[{id:"fe_express",label:"FE Express Solution Agent & UW Guide"},{id:"trendsetter",label:"Trendsetter Term Life Agent & UW Guide"},{id:"lifetime_wl",label:"Lifetime Whole Life UW Field Guide"},{id:"ffiul_ii",label:"FFIUL II Express Agent & UW Guide"},{id:"foreign_nat",label:"Foreign National ITIN UW Guidelines"}]}
 };
 
-// ── State ───────────────────────────────────────────────────────────────────
 let _clerk, pin = null, history = [], streaming = false, loadedKeys = [];
 
-// ── Clerk init ──────────────────────────────────────────────────────────────
 window.addEventListener('load', async function() {
   await window.Clerk.load();
   if (!window.Clerk.user) {
@@ -374,7 +351,6 @@ function initApp(clerk) {
 async function token() { return await _clerk?.session?.getToken(); }
 async function doSignOut() { await _clerk?.signOut(); window.location.href = '/index.html'; }
 
-// ── Tabs ────────────────────────────────────────────────────────────────────
 function switchTab(t) {
   ["search","setup"].forEach(x => {
     document.getElementById("tab-"+x).classList.toggle("active", x===t);
@@ -383,14 +359,13 @@ function switchTab(t) {
   if (t === "setup") { pin ? loadDocs() : showPin(); }
 }
 
-// ── Chat ────────────────────────────────────────────────────────────────────
-function resize(el) { el.style.height="auto"; el.style.height=Math.min(el.scrollHeight,150)+"px"; }
-function onKey(e) { if (e.key==="Enter"&&!e.shiftKey) { e.preventDefault(); send(); } }
-function useEx(btn) { document.getElementById("chat-in").value=btn.textContent.trim(); document.getElementById("chat-in").focus(); }
+function resize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,150)+'px'; }
+function onKey(e) { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); send(); } }
+function useEx(btn) { document.getElementById('chat-in').value=btn.textContent.trim(); document.getElementById('chat-in').focus(); }
 
 function newChat() {
   history = [];
-  document.getElementById("messages").innerHTML = `
+  document.getElementById('messages').innerHTML = `
     <div class="empty" id="empty">
       <div class="empty-logo">uma</div>
       <h2>Ask Uma anything about underwriting</h2>
@@ -404,127 +379,113 @@ function newChat() {
 }
 
 async function send() {
-  const inp = document.getElementById("chat-in");
+  const inp = document.getElementById('chat-in');
   const q = inp.value.trim();
   if (!q || streaming) return;
   streaming = true;
-  document.getElementById("send-btn").disabled = true;
-  inp.value = ""; inp.style.height = "auto";
-
-  document.getElementById("empty")?.remove();
-
-  const msgs = document.getElementById("messages");
-  const urow = document.createElement("div");
-  urow.className = "msg user";
+  document.getElementById('send-btn').disabled = true;
+  inp.value = ''; inp.style.height = 'auto';
+  document.getElementById('empty')?.remove();
+  const msgs = document.getElementById('messages');
+  const urow = document.createElement('div');
+  urow.className = 'msg user';
   urow.innerHTML = `<div class="bubble">${esc(q)}</div>`;
   msgs.appendChild(urow);
-
-  const arow = document.createElement("div");
-  arow.className = "msg assistant";
-  arow.innerHTML = `<div class="bubble" id="abubble">
-    <div class="load-row"><div class="spin"></div><span>Finding best carrier…</span></div>
-  </div>`;
+  const arow = document.createElement('div');
+  arow.className = 'msg assistant';
+  arow.innerHTML = `<div class="bubble" id="abubble"><div class="load-row"><div class="spin"></div><span>Finding best carrier…</span></div></div>`;
   msgs.appendChild(arow);
   scrollB();
-
   try {
     const tk = await token();
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${tk}` },
+    const res = await fetch('/.netlify/functions/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
       body: JSON.stringify({ question: q, history }),
     });
     if (res.status === 401) { await doSignOut(); return; }
-    if (!res.ok) throw new Error("Request failed");
-
+    if (!res.ok) throw new Error('Request failed');
     const data = await res.json();
     const { reply, routing = [] } = data;
-
-    const bubble = document.getElementById("abubble");
-    bubble.innerHTML = "";
-
+    const bubble = document.getElementById('abubble');
+    bubble.innerHTML = '';
     if (routing.length > 0) {
-      const pills = document.createElement("div");
-      pills.className = "pills";
+      const pills = document.createElement('div');
+      pills.className = 'pills';
       routing.forEach(r => {
         const ci = CARRIERS[r.c];
         if (!ci) return;
-        const p = document.createElement("span");
-        p.className = "pill";
+        const p = document.createElement('span');
+        p.className = 'pill';
         p.style.cssText = `color:${ci.color};border-color:${ci.color}22;background:${ci.color}14`;
         p.innerHTML = `<span class="pdot" style="background:${ci.color}"></span>${esc(ci.name)}`;
         pills.appendChild(p);
       });
       bubble.appendChild(pills);
     }
-
-    const txt = document.createElement("div");
+    const txt = document.createElement('div');
     txt.innerHTML = renderMd(reply);
     bubble.appendChild(txt);
-
-    history.push({ role: "user", content: q });
-    history.push({ role: "assistant", content: reply });
-
+    history.push({ role: 'user', content: q });
+    history.push({ role: 'assistant', content: reply });
   } catch (err) {
-    document.getElementById("abubble").innerHTML =
+    document.getElementById('abubble').innerHTML =
       `<span style="color:#E85D2F"><i class="ti ti-alert-circle"></i> ${esc(err.message)}</span>`;
   } finally {
     streaming = false;
-    document.getElementById("send-btn").disabled = false;
+    document.getElementById('send-btn').disabled = false;
     scrollB();
   }
 }
 
-function scrollB() { const m = document.getElementById("messages"); m.scrollTop = m.scrollHeight; }
-function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function scrollB() { const m = document.getElementById('messages'); m.scrollTop = m.scrollHeight; }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function renderMd(t) {
   return esc(t)
-    .replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>")
-    .replace(/\*(.+?)\*/g,"<em>$1</em>")
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,'<em>$1</em>')
     .replace(/`(.+?)`/g,"<code style='background:rgba(255,255,255,.07);padding:.1em .3em;border-radius:4px;font-size:.87em'>$1</code>")
-    .replace(/\n/g,"<br/>");
+    .replace(/\n/g,'<br/>');
 }
 
-// ── PIN ─────────────────────────────────────────────────────────────────────
 function showPin() {
-  document.getElementById("pin-modal").style.display = "flex";
-  document.getElementById("pin-in").value = "";
-  document.getElementById("pin-err").style.display = "none";
-  setTimeout(() => document.getElementById("pin-in").focus(), 60);
-  document.getElementById("pin-in").onkeydown = e => { if (e.key==="Enter") doUnlock(); };
+  document.getElementById('pin-modal').style.display = 'flex';
+  document.getElementById('pin-in').value = '';
+  document.getElementById('pin-err').style.display = 'none';
+  setTimeout(() => document.getElementById('pin-in').focus(), 60);
+  document.getElementById('pin-in').onkeydown = e => { if (e.key==='Enter') doUnlock(); };
 }
 
 function doUnlock() {
-  const v = document.getElementById("pin-in").value.trim();
+  const v = document.getElementById('pin-in').value.trim();
   if (!v) return;
   pin = v;
-  document.getElementById("pin-modal").style.display = "none";
+  document.getElementById('pin-modal').style.display = 'none';
   loadDocs();
 }
 
-// ── Docs ─────────────────────────────────────────────────────────────────────
 async function loadDocs() {
-  document.getElementById("carrier-cards").innerHTML =
+  document.getElementById('carrier-cards').innerHTML =
     '<div class="load-row" style="padding:2rem 0"><div class="spin"></div> Loading…</div>';
   try {
     const tk = await token();
-    const res = await fetch("/api/list-docs", { headers: { "Authorization": `Bearer ${tk}` } });
+    const res = await fetch('/.netlify/functions/list-docs', { headers: { 'Authorization': `Bearer ${tk}` } });
     if (res.status === 401) { await doSignOut(); return; }
     const { keys } = await res.json();
     loadedKeys = keys || [];
     renderCards();
   } catch (e) {
-    document.getElementById("carrier-cards").innerHTML = `<p style="color:#E85D2F">${esc(e.message)}</p>`;
+    document.getElementById('carrier-cards').innerHTML = `<p style="color:#E85D2F">${esc(e.message)}</p>`;
   }
 }
 
 function renderCards() {
-  const wrap = document.getElementById("carrier-cards");
-  wrap.innerHTML = "";
+  const wrap = document.getElementById('carrier-cards');
+  wrap.innerHTML = '';
   for (const [cid, c] of Object.entries(CARRIERS)) {
     const loaded = c.slots.filter(s => loadedKeys.includes(`${cid}_${s.id}`)).length;
-    const card = document.createElement("div");
-    card.className = "cc";
+    const card = document.createElement('div');
+    card.className = 'cc';
     card.innerHTML = `
       <div class="cc-hd">
         <div class="cdot" style="background:${c.color}"></div>
@@ -535,15 +496,15 @@ function renderCards() {
     const slotsEl = card.querySelector(`#slots-${cid}`);
     for (const s of c.slots) {
       const isLoaded = loadedKeys.includes(`${cid}_${s.id}`);
-      const row = document.createElement("div");
-      row.className = "slot-row";
+      const row = document.createElement('div');
+      row.className = 'slot-row';
       row.innerHTML = `
         <div class="slot-ic">${isLoaded
           ? `<span style="color:#1B9E5E"><i class="ti ti-circle-check-filled"></i></span>`
           : `<span style="color:var(--muted)"><i class="ti ti-file"></i></span>`}</div>
         <div class="slot-info">
           <div class="slot-label">${esc(s.label)}</div>
-          ${s.num ? `<div class="slot-num">Form ${esc(s.num)}</div>` : ""}
+          ${s.num ? `<div class="slot-num">Form ${esc(s.num)}</div>` : ''}
         </div>
         <div class="slot-acts">
           ${isLoaded
@@ -561,51 +522,50 @@ function renderCards() {
 function trigUp(cid, sid) { document.getElementById(`fi-${cid}-${sid}`)?.click(); }
 
 async function doUp(e, cid, sid) {
-  const file = e.target.files?.[0]; e.target.value = "";
+  const file = e.target.files?.[0]; e.target.value = '';
   if (!file) return;
-  if (file.size > 5*1024*1024) { toast("File exceeds 5 MB limit","err"); return; }
-  toast("Uploading…","info");
+  if (file.size > 5*1024*1024) { toast('File exceeds 5 MB limit','err'); return; }
+  toast('Uploading…','info');
   try {
     const b64 = await toB64(file);
-    const res = await fetch("/api/upload", {
-      method:"POST", headers:{"Content-Type":"application/json"},
+    const res = await fetch('/.netlify/functions/upload', {
+      method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ pin, carrier:cid, slotId:sid, data:b64 }),
     });
-    if (res.status===401) { pin=null; toast("Incorrect PIN","err"); showPin(); return; }
-    if (!res.ok) throw new Error((await res.json()).error||"Upload failed");
-    toast(`Uploaded: ${file.name}`,"ok");
+    if (res.status===401) { pin=null; toast('Incorrect PIN','err'); showPin(); return; }
+    if (!res.ok) throw new Error((await res.json()).error||'Upload failed');
+    toast(`Uploaded: ${file.name}`,'ok');
     await loadDocs();
-  } catch(err) { toast(err.message,"err"); }
+  } catch(err) { toast(err.message,'err'); }
 }
 
 async function delDoc(cid, sid) {
-  if (!confirm("Remove this document? Agents will no longer be able to search it.")) return;
+  if (!confirm('Remove this document? Agents will no longer be able to search it.')) return;
   try {
-    const res = await fetch("/api/delete-doc", {
-      method:"POST", headers:{"Content-Type":"application/json"},
+    const res = await fetch('/.netlify/functions/delete-doc', {
+      method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ pin, carrier:cid, slotId:sid }),
     });
-    if (res.status===401) { pin=null; toast("Incorrect PIN","err"); showPin(); return; }
-    if (!res.ok) throw new Error((await res.json()).error||"Delete failed");
-    toast("Document removed","ok");
+    if (res.status===401) { pin=null; toast('Incorrect PIN','err'); showPin(); return; }
+    if (!res.ok) throw new Error((await res.json()).error||'Delete failed');
+    toast('Document removed','ok');
     await loadDocs();
-  } catch(err) { toast(err.message,"err"); }
+  } catch(err) { toast(err.message,'err'); }
 }
 
 function toB64(file) {
   return new Promise((res,rej)=>{
-    const r=new FileReader(); r.onload=()=>res(r.result.split(",")[1]); r.onerror=rej;
+    const r=new FileReader(); r.onload=()=>res(r.result.split(',')[1]); r.onerror=rej;
     r.readAsDataURL(file);
   });
 }
 
-// ── Toast ────────────────────────────────────────────────────────────────────
-function toast(msg, type="info") {
-  const icons={ok:"ti-circle-check",err:"ti-alert-circle",info:"ti-info-circle"};
-  const el=document.createElement("div");
+function toast(msg, type='info') {
+  const icons={ok:'ti-circle-check',err:'ti-alert-circle',info:'ti-info-circle'};
+  const el=document.createElement('div');
   el.className=`toast ${type}`;
   el.innerHTML=`<i class="ti ${icons[type]||'ti-info-circle'}"></i> ${esc(msg)}`;
-  document.getElementById("toasts").appendChild(el);
+  document.getElementById('toasts').appendChild(el);
   setTimeout(()=>el.remove(), 3400);
 }
 </script>
