@@ -1,5 +1,4 @@
 import { getStore } from "@netlify/blobs";
-import { extractText } from "unpdf";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -30,33 +29,24 @@ export default async function handler(req) {
     });
   }
 
-  // Decode base64 and extract text (store as text for AI retrieval)
   const buf = Buffer.from(data, "base64");
   if (buf.byteLength > 4.5 * 1024 * 1024) {
     return new Response(JSON.stringify({ error: "File exceeds 4.5 MB limit" }), {
       status: 400, headers: { ...CORS, "Content-Type": "application/json" },
     });
   }
-
-  let text;
-  try {
-    const result = await extractText(new Uint8Array(buf), { mergePages: true });
-    text = result.text?.trim();
-  } catch {
-    return new Response(JSON.stringify({ error: "Could not read PDF — file may be corrupt or scanned images without text" }), {
-      status: 400, headers: { ...CORS, "Content-Type": "application/json" },
-    });
-  }
-  if (!text) {
-    return new Response(JSON.stringify({ error: "No extractable text found in PDF — it may be a scanned image" }), {
+  if (buf.slice(0, 5).toString("latin1") !== "%PDF-") {
+    return new Response(JSON.stringify({ error: "File does not appear to be a PDF" }), {
       status: 400, headers: { ...CORS, "Content-Type": "application/json" },
     });
   }
 
-  // Store the extracted plain text — chat.mjs reads it directly as context
+  // Store the raw PDF bytes -- chat.mjs sends them to Claude as native PDF
+  // document blocks so the model reads the actual table layout instead of a
+  // flattened, column-ambiguous text extraction.
   const store = getStore("carrier-docs");
   const key = `${carrier}_${slotId}`;
-  await store.set(key, text, {
+  await store.set(key, buf, {
     metadata: { carrier, slotId, uploadedAt: new Date().toISOString() },
   });
 

@@ -70,61 +70,70 @@ IMPORTANT RULES:
 - Never guarantee approval — frame everything as "likely" or "based on guidelines"
 - If I haven't uploaded guidelines for a carrier yet, tell me rather than guessing`;
 
-// Narrow, disclosed auxiliary step: pull search terms out of the client
-// profile so we can find the relevant page in each carrier's documents.
-// This model NEVER produces the underwriting analysis itself -- that always
-// runs on claude-sonnet-5 below, with no fallback.
-const KEYWORD_SYSTEM = `Extract 3-10 short search terms for ONLY the medical conditions, impairments, and tobacco/nicotine use mentioned in this client profile, in the plain terminology an insurance underwriting guide would use. Include medical synonyms (e.g. for a TIA case, include "TIA", "transient ischemic attack", "stroke"). Do not include age, gender, height/weight, dollar amounts, names, or product types (e.g. never return terms like "whole life insurance" or "term insurance") -- those terms appear throughout every carrier's marketing text and will crowd out the actual medical impairment tables we're searching for.
-Return JSON only: {"kw":["term1","term2"]}`;
-
 const CARRIERS = ["fg", "foresters", "allianz", "transamerica"];
 const CARRIER_NAMES = { fg: "F&G", foresters: "Foresters", allianz: "Allianz", transamerica: "Transamerica" };
+
+// Human-readable labels for each uploaded slot, mirrored from the Setup tab's
+// CARRIERS config in app.html. Used only for the document-selection step below
+// -- the model never sees these labels, only the actual PDFs it selects.
+const SLOT_LABELS = {
+  fg: {
+    telephone_uw: "Life UW Telephone Interview Guide",
+    exam_free: "Exam-Free Underwriting Guide",
+    impairment: "Impairment Field UW Guide",
+    afge: "AFGE (federal employees union) Field UW Guide",
+    natguard: "National Guard Field UW Guide",
+    foreign_nat: "Foreign National UW Categories",
+  },
+  foresters: {
+    main_uw: "Main UW Guide (Your Term, Strong Foundation, Advantage Plus II, SMART UL)",
+    main_uw_apr26: "Main UW Guide — Apr 2026 Edition",
+    accel_uw: "Accelerated UW Program Guide",
+    nonmed: "Non-Med Platform Worksheet (product overview, not an impairment guide)",
+    diabetes: "Diabetes Ratings for Non-Med Business",
+    immigration: "Immigration Guidelines for Non-US Citizens",
+    brightfuture: "BrightFuture Children's Whole Life UW Guide (juvenile applicants only)",
+    planright: "PlanRight Medical Reference Guide",
+  },
+  allianz: {
+    uw_guide: "Underwriting Guidelines",
+    uw_financial: "Underwriting Guidelines — Financial (large face amounts / high net worth)",
+    uw_pathways: "Underwriting Pathways",
+    aps: "APS Ordering Guidelines (process document, not medical decisions)",
+    athletes: "Professional Athletes UW Guidelines",
+    accel: "Accelerated UW Program Brochure",
+  },
+  transamerica: {
+    fe_express: "FE Express Solution Agent & UW Guide (final expense)",
+    trendsetter: "Trendsetter Term Life Agent & UW Guide",
+    lifetime_wl: "Lifetime Whole Life UW Field Guide",
+    ffiul_ii: "FFIUL II Express Agent & UW Guide (IUL)",
+    fciul_ii: "FCIUL II Agent Guide (IUL)",
+    foreign_nat: "Foreign National ITIN UW Guidelines",
+  },
+};
+
+// Narrow, disclosed auxiliary step: given the client profile and the list of
+// documents actually uploaded per carrier, pick which ones are worth sending
+// in full. This model NEVER produces the underwriting analysis itself -- that
+// always runs on claude-sonnet-5 below, with no fallback. Sending every
+// uploaded document for every carrier regardless of relevance would blow past
+// both the context window and the function's time budget, so this step exists
+// purely to bound size -- it is deliberately biased toward over-including
+// rather than under-including, since a missed document produces a wrong
+// underwriting call while an extra one only costs a bit of context.
+const DOC_SELECT_SYSTEM = `You are selecting which underwriting guideline documents to load for a specific client scenario, given a list of documents actually available per carrier.
+Rules:
+- Always include documents that are general/main underwriting guides, impairment guides, or medical reference guides -- these contain the core condition-to-rate-class decision tables and apply to nearly every case.
+- Only include a narrow, population-specific document (diabetes-specific, foreign national/immigration, professional athletes, military/government-employee-specific, children's/juvenile products) if the client profile clearly matches that population.
+- Never include purely administrative/process documents (e.g. telephone interview guides, APS ordering guides) -- they contain no condition-specific rate class decisions.
+- If you are unsure whether a document applies, include it. Omitting a relevant document produces a wrong underwriting call; including an extra one only costs a bit of context.
+Return JSON only: {"carrier_id": ["slotId1","slotId2"], ...} -- one array per carrier that has at least one available document, using the exact slot IDs given.`;
 
 async function checkAuth(authHeader) {
   const token = (authHeader || "").replace("Bearer ", "").trim();
   if (!token) throw new Error("Missing token");
   await verifyToken(token, { secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
-}
-
-// Pull windows of text around keyword matches wherever they fall in the
-// document, instead of blindly truncating from the start -- a blind slice
-// can cut off before the actual decision-chart entry in a long document.
-function extractRelevant(text, keywords, maxTotal) {
-  const head = text.slice(0, 800);
-  if (!keywords?.length) return { text: text.slice(0, maxTotal), matched: false };
-
-  const windows = [];
-  for (const kw of keywords) {
-    const needle = kw.trim();
-    if (!needle) continue;
-    // Word-boundary match -- a plain substring search would match "TIA"
-    // inside "essential", "substantial", "differentiate", etc.
-    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const re = new RegExp(`\\b${escaped}\\b`, "gi");
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      windows.push([Math.max(0, m.index - 1200), Math.min(text.length, m.index + needle.length + 1800)]);
-    }
-  }
-  if (windows.length === 0) return { text: text.slice(0, maxTotal), matched: false };
-
-  windows.sort((a, b) => a[0] - b[0]);
-  const merged = [windows[0]];
-  for (const [start, end] of windows.slice(1)) {
-    const last = merged[merged.length - 1];
-    if (start <= last[1] + 200) last[1] = Math.max(last[1], end);
-    else merged.push([start, end]);
-  }
-
-  let out = merged[0][0] > 0 ? head + "\n...\n" : "";
-  let used = out.length;
-  for (const [start, end] of merged) {
-    if (used >= maxTotal) break;
-    const chunk = text.slice(start, end);
-    out += (out ? "\n...\n" : "") + chunk;
-    used += chunk.length;
-  }
-  return { text: out.slice(0, maxTotal), matched: true };
 }
 
 export default async function handler(req) {
@@ -154,80 +163,100 @@ export default async function handler(req) {
   const anthropic = new Anthropic({ apiKey: Netlify.env.get("ANTHROPIC_API_KEY") });
   const store = getStore("carrier-docs");
 
-  // Step 1: extract search keywords from the client profile (claude-haiku-4-5,
-  // extraction only -- see comment on KEYWORD_SYSTEM above).
-  let keywords = [];
-  try {
-    const kwMsg = await anthropic.messages.create({
-      model: "claude-haiku-4-5",
-      max_tokens: 300,
-      system: KEYWORD_SYSTEM,
-      messages: [{ role: "user", content: profile }],
-    });
-    const kwText = kwMsg.content?.[0]?.text ?? "";
-    const parsed = JSON.parse(kwText.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-    keywords = parsed.kw ?? [];
-  } catch {
-    keywords = [];
-  }
-
-  // Step 2: assemble every carrier's guideline text. Every one of the 4
-  // known carriers is represented, whether or not documents are uploaded
-  // for it -- the system prompt has a hard rule that missing guidelines
-  // must be stated explicitly, never guessed around.
+  // Step 1: figure out what's actually uploaded, keyed by carrier.
   let allKeys = [];
   try {
     const { blobs } = await store.list();
-    allKeys = blobs.map((b) => b.key);
+    allKeys = blobs.map((b) => b.key).sort();
   } catch { /* store empty or unavailable */ }
 
   const carrierStatus = {};
-  const docSections = [];
+  const available = {}; // carrier -> [{id, label}]
   for (const carrier of CARRIERS) {
-    const name = CARRIER_NAMES[carrier];
     const slotKeys = allKeys.filter((k) => k.startsWith(`${carrier}_`));
     if (slotKeys.length === 0) {
       carrierStatus[carrier] = "none";
-      docSections.push(`\n\n=== ${name.toUpperCase()} ===\nNO GUIDELINES UPLOADED FOR THIS CARRIER.`);
       continue;
     }
-    const perSlotBudget = Math.max(4500, Math.floor(30000 / slotKeys.length));
-    let anyMatched = false;
-    const parts = [];
-    for (const key of slotKeys) {
-      try {
-        const blob = await store.get(key, { type: "text" });
-        if (!blob) continue;
-        const slotId = key.slice(carrier.length + 1);
-        const result = extractRelevant(blob, keywords, perSlotBudget);
-        if (result.matched) {
-          anyMatched = true;
-          parts.push(`--- ${slotId} ---\n${result.text}`);
-        } else {
-          // No keyword hit in this specific document -- note it exists
-          // without spending context budget on it.
-          parts.push(`--- ${slotId} --- (no specific mention of the stated conditions found in a keyword scan of this document)`);
-        }
-      } catch { /* skip */ }
-    }
-    carrierStatus[carrier] = anyMatched ? "matched" : "uploaded";
-    docSections.push(`\n\n=== ${name.toUpperCase()} ===\n${parts.join("\n\n")}`);
+    carrierStatus[carrier] = "uploaded";
+    available[carrier] = slotKeys.map((k) => {
+      const slotId = k.slice(carrier.length + 1);
+      return { id: slotId, label: SLOT_LABELS[carrier]?.[slotId] || slotId };
+    });
   }
 
-  // Temporary diagnostic path: return the exact assembled context instead of
-  // calling the model, so we can inspect what extractRelevant actually pulled
-  // for a given carrier/product without burning an API call.
+  // Step 2: pick which of the available documents to actually load in full,
+  // per DOC_SELECT_SYSTEM above (claude-haiku-4-5, selection only).
+  let selected = {};
+  if (Object.keys(available).length > 0) {
+    try {
+      const selMsg = await anthropic.messages.create({
+        model: "claude-haiku-4-5",
+        max_tokens: 1000,
+        system: DOC_SELECT_SYSTEM,
+        messages: [
+          {
+            role: "user",
+            content: `CLIENT PROFILE:\n${profile}\n\nAVAILABLE DOCUMENTS PER CARRIER:\n${JSON.stringify(available, null, 2)}`,
+          },
+        ],
+      });
+      const selText = selMsg.content?.[0]?.text ?? "";
+      selected = JSON.parse(selText.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+    } catch {
+      // If selection fails for any reason, fall back to everything available
+      // rather than silently sending nothing.
+      for (const carrier of Object.keys(available)) {
+        selected[carrier] = available[carrier].map((d) => d.id);
+      }
+    }
+  }
+
+  // Step 3: fetch the selected PDFs as raw bytes and build native document
+  // blocks -- Claude reads the actual table layout instead of a flattened,
+  // column-ambiguous text extraction. Citations are enabled so page-level
+  // citations in the answer are grounded in the real document, not guessed.
+  const contentBlocks = [];
+  for (const carrier of CARRIERS) {
+    const name = CARRIER_NAMES[carrier];
+    if (carrierStatus[carrier] === "none") {
+      contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()}: NO GUIDELINES UPLOADED FOR THIS CARRIER ===` });
+      continue;
+    }
+    const slotIds = selected[carrier]?.length ? selected[carrier] : available[carrier].map((d) => d.id);
+    contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()} GUIDELINE DOCUMENTS ===` });
+    for (const slotId of slotIds) {
+      const key = `${carrier}_${slotId}`;
+      try {
+        const buf = await store.get(key, { type: "arrayBuffer" });
+        if (!buf) continue;
+        contentBlocks.push({
+          type: "document",
+          source: { type: "base64", media_type: "application/pdf", data: Buffer.from(buf).toString("base64") },
+          title: `${name} — ${SLOT_LABELS[carrier]?.[slotId] || slotId}`,
+          citations: { enabled: true },
+        });
+      } catch { /* skip unreadable doc */ }
+    }
+  }
+  // Cache breakpoint on the last static block: the document set only changes
+  // when someone uploads/deletes a file, so repeated requests within the
+  // cache TTL reuse this processing instead of re-reading every PDF.
+  if (contentBlocks.length) {
+    contentBlocks[contentBlocks.length - 1].cache_control = { type: "ephemeral" };
+  }
+
   if (debug) {
-    return new Response(JSON.stringify({ keywords, carrierStatus, docSections }), {
+    return new Response(JSON.stringify({ available, selected, carrierStatus, blockCount: contentBlocks.length }), {
       status: 200, headers: { ...CORS, "Content-Type": "application/json" },
     });
   }
 
-  // Step 3: analysis -- always claude-sonnet-5, no fallback to a cheaper model.
+  // Step 4: analysis -- always claude-sonnet-5, no fallback to a cheaper model.
   const messages = [
     {
       role: "user",
-      content: `${profile}\n\n<uploaded_guidelines>${docSections.join("")}\n</uploaded_guidelines>`,
+      content: [...contentBlocks, { type: "text", text: profile }],
     },
   ];
 
