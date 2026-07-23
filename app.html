@@ -393,8 +393,9 @@ async function send() {
   msgs.appendChild(urow);
   const arow = document.createElement('div');
   arow.className = 'msg assistant';
-  arow.innerHTML = `<div class="bubble" id="abubble"><div class="load-row"><div class="spin"></div><span>Finding best carrier…</span></div></div>`;
+  arow.innerHTML = `<div class="bubble"><div class="load-row"><div class="spin"></div><span>Finding best carrier…</span></div></div>`;
   msgs.appendChild(arow);
+  const bubble = arow.querySelector('.bubble');
   scrollB();
   try {
     const tk = await token();
@@ -407,7 +408,6 @@ async function send() {
     if (!res.ok) throw new Error('Request failed');
     const data = await res.json();
     const { reply, routing = [] } = data;
-    const bubble = document.getElementById('abubble');
     bubble.innerHTML = '';
     if (routing.length > 0) {
       const pills = document.createElement('div');
@@ -429,7 +429,7 @@ async function send() {
     history.push({ role: 'user', content: q });
     history.push({ role: 'assistant', content: reply });
   } catch (err) {
-    document.getElementById('abubble').innerHTML =
+    bubble.innerHTML =
       `<span style="color:#E85D2F"><i class="ti ti-alert-circle"></i> ${esc(err.message)}</span>`;
   } finally {
     streaming = false;
