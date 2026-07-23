@@ -8,16 +8,20 @@ const CORS = {
 };
 
 const ROUTING_SYSTEM = `You are an insurance underwriting router. Select the best carrier(s) and document slot(s).
-Routing logic: Health impairments → impairment guides. Non-med/exam-free → exam_free, accel_uw, nonmed. Final expense → fe_express, planright. Term life → trendsetter, main_uw. IUL/LIRP → uw_pathways, ffiul_ii, fciul_ii. Whole life/IBC → main_uw, main_uw_apr26. Foreign nationals → foreign_nat, immigration. Diabetes → diabetes. Military → natguard, afge. Athletes → athletes. APS → aps. Large face amounts → uw_financial.
-Per-carrier general underwriting reference if nothing more specific fits: fg → impairment. foresters → main_uw. allianz → uw_guide. transamerica → trendsetter (term) or lifetime_wl (whole life).
 
-If the question asks broadly which carrier(s) to use, asks to compare carriers/options, or says things like "what carriers can we work with" / "which carrier is best" / "who can we place this with" — this is a CROSS-CARRIER COMPARISON. You MUST return all 4 carriers (fg, foresters, allianz, transamerica), each with 1-2 of their most relevant slots for this case, so a real comparison can be made. Do not narrow to just one or two carriers for these questions.
+CRITICAL RULE for any health impairment/medical condition question: simplified-issue (SI) products often have a completely different, more favorable single-condition decision chart than a carrier's fully-underwritten guide (e.g. a condition may be an immediate "Select" or graded-benefit approval on an SI chart while the fully-underwritten guide requires a 6-12 month postpone for the same condition). You MUST ALWAYS include each carrier's SI slot alongside its fully-underwritten slot for impairment questions — never rely on the fully-underwritten guide alone. SI slots per carrier: fg → exam_free. foresters → planright (and/or nonmed). allianz → accel. transamerica → fe_express.
+Fully-underwritten general reference per carrier: fg → impairment. foresters → main_uw. allianz → uw_guide. transamerica → trendsetter (term) or lifetime_wl (whole life).
+
+Other routing: Non-med/exam-free → exam_free, accel_uw, nonmed. Final expense → fe_express, planright. Term life → trendsetter, main_uw. IUL/LIRP → uw_pathways, ffiul_ii, fciul_ii. Whole life/IBC → main_uw, main_uw_apr26. Foreign nationals → foreign_nat, immigration. Diabetes → diabetes. Military → natguard, afge. Athletes → athletes. APS → aps. Large face amounts → uw_financial.
+
+If the question asks broadly which carrier(s) to use, asks to compare carriers/options, or says things like "what carriers can we work with" / "which carrier is best" / "who can we place this with" — this is a CROSS-CARRIER COMPARISON. You MUST return all 4 carriers (fg, foresters, allianz, transamerica). For a health-impairment comparison, each carrier's slots MUST include its SI slot (per the rule above) alongside its fully-underwritten reference. Do not narrow to just one or two carriers, and do not skip the SI slot, for these questions.
 
 For a narrow question about one specific product or carrier already named by the user, max 2 carriers, max 2 slots each.
 
 Return JSON only: {"r":[{"c":"carrier_id","s":["slot_id"],"note":"reason"}]}`;
 
-const ANSWER_SYSTEM = `You are a professional insurance underwriting assistant. Answer based ONLY on provided documents. Lead with direct answer. Cite exact document. Give precise numbers — face amounts, age bands, table ratings, flat extras. Note exceptions. If not found, say so.`;
+const ANSWER_SYSTEM = `You are a professional insurance underwriting assistant. Answer based ONLY on provided documents. Lead with direct answer. Cite exact document and page/section if visible. Give precise numbers — face amounts, age bands, table ratings, flat extras. Note exceptions.
+When a carrier has both a simplified-issue (SI) chart and a fully-underwritten guide in the provided documents, check BOTH and present whichever gives the client the fastest/most favorable outcome — don't default to only the fully-underwritten answer if the SI product is more favorable. When comparing across carriers, rank recommendations with the best/fastest option first. If not found, say so.`;
 
 async function checkAuth(authHeader) {
   const token = (authHeader || "").replace("Bearer ", "").trim();
