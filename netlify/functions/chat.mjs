@@ -224,13 +224,20 @@ export default async function handler(req) {
       continue;
     }
     const slotIds = selected[carrier]?.length ? selected[carrier] : available[carrier].map((d) => d.id);
-    contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()} GUIDELINE DOCUMENTS ===` });
+    const docBlocks = [];
     for (const slotId of slotIds) {
       const key = `${carrier}_${slotId}`;
       try {
         const buf = await store.get(key, { type: "arrayBuffer" });
         if (!buf) continue;
-        contentBlocks.push({
+        // Guard against stale entries from the previous text-extraction pipeline
+        // (which stored plain text, not PDF bytes, under these same keys) --
+        // skip anything that isn't actually a PDF rather than sending Claude
+        // invalid document data and failing the whole request.
+        const bytes = new Uint8Array(buf);
+        const looksLikePdf = bytes.length > 5 && String.fromCharCode(...bytes.slice(0, 5)) === "%PDF-";
+        if (!looksLikePdf) continue;
+        docBlocks.push({
           type: "document",
           source: { type: "base64", media_type: "application/pdf", data: Buffer.from(buf).toString("base64") },
           title: `${name} — ${SLOT_LABELS[carrier]?.[slotId] || slotId}`,
@@ -238,6 +245,13 @@ export default async function handler(req) {
         });
       } catch { /* skip unreadable doc */ }
     }
+    if (docBlocks.length === 0) {
+      carrierStatus[carrier] = "none";
+      contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()}: NO GUIDELINES UPLOADED FOR THIS CARRIER ===` });
+      continue;
+    }
+    contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()} GUIDELINE DOCUMENTS ===` });
+    contentBlocks.push(...docBlocks);
   }
   // Cache breakpoint on the last static block: the document set only changes
   // when someone uploads/deletes a file, so repeated requests within the
