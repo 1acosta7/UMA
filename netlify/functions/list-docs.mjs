@@ -1,5 +1,4 @@
 import { getStore } from "@netlify/blobs";
-import { createClerk } from "@clerk/backend";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -8,12 +7,17 @@ const CORS = {
 };
 
 async function verifyToken(authHeader) {
-  if (!authHeader?.startsWith("Bearer ")) throw new Error("Missing token");
-  const token = authHeader.slice(7).trim();
-  const clerk = createClerk({ secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
-  const payload = await clerk.verifyToken(token);
-  if (!payload?.sub) throw new Error("Invalid token");
-  return payload.sub;
+  const token = (authHeader || "").replace("Bearer ", "").trim();
+  if (!token) throw new Error("Missing token");
+  const res = await fetch("https://api.clerk.com/v1/tokens/verify", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${Netlify.env.get("CLERK_SECRET_KEY")}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) throw new Error("Invalid token");
 }
 
 export default async function handler(req) {
