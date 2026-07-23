@@ -1,4 +1,5 @@
 import { getStore } from "@netlify/blobs";
+import { extractText } from "unpdf";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -37,10 +38,25 @@ export default async function handler(req) {
     });
   }
 
-  // Store the raw base64 text — chat.mjs reads it as text for context
+  let text;
+  try {
+    const result = await extractText(new Uint8Array(buf), { mergePages: true });
+    text = result.text?.trim();
+  } catch {
+    return new Response(JSON.stringify({ error: "Could not read PDF — file may be corrupt or scanned images without text" }), {
+      status: 400, headers: { ...CORS, "Content-Type": "application/json" },
+    });
+  }
+  if (!text) {
+    return new Response(JSON.stringify({ error: "No extractable text found in PDF — it may be a scanned image" }), {
+      status: 400, headers: { ...CORS, "Content-Type": "application/json" },
+    });
+  }
+
+  // Store the extracted plain text — chat.mjs reads it directly as context
   const store = getStore("carrier-docs");
   const key = `${carrier}_${slotId}`;
-  await store.set(key, data, {
+  await store.set(key, text, {
     metadata: { carrier, slotId, uploadedAt: new Date().toISOString() },
   });
 

@@ -94,7 +94,7 @@ export default async function handler(req) {
         const blob = await store.get(key, { type: "text" });
         if (blob) {
           searched.push(key);
-          docBlocks.push(`\n\n=== ${carrier.toUpperCase()} / ${slotId} ===\n${blob.slice(0, 30000)}`);
+          docBlocks.push(`\n\n=== ${carrier.toUpperCase()} / ${slotId} ===\n${blob.slice(0, 100000)}`);
         }
       } catch { /* not uploaded yet */ }
     }
@@ -109,7 +109,7 @@ export default async function handler(req) {
           const blob = await store.get(b.key, { type: "text" });
           if (blob) {
             searched.push(b.key);
-            docBlocks.push(`\n\n=== ${b.key} ===\n${blob.slice(0, 15000)}`);
+            docBlocks.push(`\n\n=== ${b.key} ===\n${blob.slice(0, 30000)}`);
           }
         } catch { /* skip */ }
       }
