@@ -284,24 +284,24 @@
       <div class="messages" id="messages">
         <div class="empty" id="empty">
           <div class="empty-logo">uma</div>
-          <h2>Ask Uma anything about underwriting</h2>
-          <p>Describe your client — age, health history, product type, face amount — and Uma routes to the right carrier automatically.</p>
+          <h2>Paste a client profile for underwriting analysis</h2>
+          <p>Age, gender, height/weight, tobacco use, medical &amp; family history, desired coverage. Uma cross-references every carrier's uploaded guidelines and ranks the best option.</p>
           <div class="examples">
-            <button class="ex-btn" onclick="useEx(this)">58M, history of COPD, $100k whole life — what carriers can we work with?</button>
-            <button class="ex-btn" onclick="useEx(this)">45F preferred health, $500k 20-year term, non-med if possible</button>
-            <button class="ex-btn" onclick="useEx(this)">62M wants to overfund an IUL for retirement income — Allianz AUW requirements?</button>
+            <button class="ex-btn" onclick="useEx(this)">58M, 5'10", 210 lbs, non-smoker. History of COPD (diagnosed 2021, on Advair, well controlled). No hospitalizations. Father died of heart attack age 74. Wants $250k whole life.</button>
+            <button class="ex-btn" onclick="useEx(this)">45F, 5'6", 145 lbs, non-smoker, no medical history. Wants $500k 20-year term, prefers non-med if possible.</button>
+            <button class="ex-btn" onclick="useEx(this)">62M, 6'0", 195 lbs, non-smoker. Type 2 diabetes (well controlled, no complications, diagnosed 2015, Metformin). Wants to overfund a $1M IUL for retirement income.</button>
           </div>
         </div>
       </div>
       <div class="input-area">
         <div class="input-row">
-          <textarea id="chat-in" rows="1" placeholder="Describe the client or ask an underwriting question…"
-            onkeydown="onKey(event)" oninput="resize(this)"></textarea>
+          <textarea id="chat-in" rows="4" placeholder="Paste the full client profile: age, gender, height/weight, tobacco use, medical history (diagnoses, dates, medications, surgeries), family history, desired coverage amount and product type…"
+            oninput="resize(this)"></textarea>
           <button class="send-btn" id="send-btn" onclick="send()"><i class="ti ti-send"></i></button>
         </div>
         <div class="input-footer">
-          <span class="hint">Enter to send · Shift+Enter for new line</span>
-          <button class="new-chat" onclick="newChat()"><i class="ti ti-plus"></i> New conversation</button>
+          <span class="hint">Shift+Enter for new line — click send when ready</span>
+          <button class="new-chat" onclick="newChat()"><i class="ti ti-plus"></i> Clear log</button>
         </div>
       </div>
     </div>
@@ -328,7 +328,7 @@ const CARRIERS = {
   transamerica:{name:"Transamerica",color:"#CC3328",slots:[{id:"fe_express",label:"FE Express Solution Agent & UW Guide"},{id:"trendsetter",label:"Trendsetter Term Life Agent & UW Guide"},{id:"lifetime_wl",label:"Lifetime Whole Life UW Field Guide"},{id:"ffiul_ii",label:"FFIUL II Express Agent & UW Guide"},{id:"fciul_ii",label:"FCIUL II Agent Guide"},{id:"foreign_nat",label:"Foreign National ITIN UW Guidelines"}]}
 };
 
-let _clerk, pin = null, history = [], streaming = false, loadedKeys = [];
+let _clerk, pin = null, streaming = false, loadedKeys = [];
 
 window.addEventListener('load', async function() {
   await window.Clerk.load();
@@ -360,23 +360,23 @@ function switchTab(t) {
 }
 
 function resize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,150)+'px'; }
-function onKey(e) { if (e.key==='Enter'&&!e.shiftKey) { e.preventDefault(); send(); } }
 function useEx(btn) { document.getElementById('chat-in').value=btn.textContent.trim(); document.getElementById('chat-in').focus(); }
 
 function newChat() {
-  history = [];
   document.getElementById('messages').innerHTML = `
     <div class="empty" id="empty">
       <div class="empty-logo">uma</div>
-      <h2>Ask Uma anything about underwriting</h2>
-      <p>Describe your client — age, health history, product type, face amount — and Uma routes to the right carrier automatically.</p>
+      <h2>Paste a client profile for underwriting analysis</h2>
+      <p>Age, gender, height/weight, tobacco use, medical &amp; family history, desired coverage. Uma cross-references every carrier's uploaded guidelines and ranks the best option.</p>
       <div class="examples">
-        <button class="ex-btn" onclick="useEx(this)">58M, history of COPD, $100k whole life — what carriers can we work with?</button>
-        <button class="ex-btn" onclick="useEx(this)">45F preferred health, $500k 20-year term, non-med if possible</button>
-        <button class="ex-btn" onclick="useEx(this)">62M wants to overfund an IUL for retirement income — Allianz AUW requirements?</button>
+        <button class="ex-btn" onclick="useEx(this)">58M, 5'10", 210 lbs, non-smoker. History of COPD (diagnosed 2021, on Advair, well controlled). No hospitalizations. Father died of heart attack age 74. Wants $250k whole life.</button>
+        <button class="ex-btn" onclick="useEx(this)">45F, 5'6", 145 lbs, non-smoker, no medical history. Wants $500k 20-year term, prefers non-med if possible.</button>
+        <button class="ex-btn" onclick="useEx(this)">62M, 6'0", 195 lbs, non-smoker. Type 2 diabetes (well controlled, no complications, diagnosed 2015, Metformin). Wants to overfund a $1M IUL for retirement income.</button>
       </div>
     </div>`;
 }
+
+const CARRIER_STATUS_LABEL = { none: 'not uploaded', uploaded: 'checked', matched: 'checked' };
 
 async function send() {
   const inp = document.getElementById('chat-in');
@@ -393,7 +393,7 @@ async function send() {
   msgs.appendChild(urow);
   const arow = document.createElement('div');
   arow.className = 'msg assistant';
-  arow.innerHTML = `<div class="bubble"><div class="load-row"><div class="spin"></div><span>Finding best carrier…</span></div></div>`;
+  arow.innerHTML = `<div class="bubble"><div class="load-row"><div class="spin"></div><span>Analyzing client profile…</span></div></div>`;
   msgs.appendChild(arow);
   const bubble = arow.querySelector('.bubble');
   scrollB();
@@ -402,14 +402,14 @@ async function send() {
     const res = await fetch('/.netlify/functions/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
-      body: JSON.stringify({ question: q, history }),
+      body: JSON.stringify({ profile: q }),
     });
     if (res.status === 401) { await doSignOut(); return; }
     if (!res.ok) throw new Error('Request failed');
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let buf = '', replyText = '', bodyBuilt = false, txt = null;
+    let buf = '', replyText = '', bodyBuilt = false, txt = null, thinkStatus = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -429,27 +429,38 @@ async function send() {
 
         if (eventType === 'meta') {
           bubble.innerHTML = '';
-          const routing = data.routing || [];
-          if (routing.length > 0) {
-            const pills = document.createElement('div');
-            pills.className = 'pills';
-            routing.forEach(r => {
-              const ci = CARRIERS[r.c];
-              if (!ci) return;
-              const p = document.createElement('span');
-              p.className = 'pill';
-              p.style.cssText = `color:${ci.color};border-color:${ci.color}22;background:${ci.color}14`;
-              p.innerHTML = `<span class="pdot" style="background:${ci.color}"></span>${esc(ci.name)}`;
-              pills.appendChild(p);
-            });
-            bubble.appendChild(pills);
-          }
-          txt = document.createElement('div');
-          bubble.appendChild(txt);
+          const cs = data.carrierStatus || {};
+          const pills = document.createElement('div');
+          pills.className = 'pills';
+          Object.entries(CARRIERS).forEach(([cid, ci]) => {
+            const status = cs[cid] || 'none';
+            const dim = status === 'none';
+            const p = document.createElement('span');
+            p.className = 'pill';
+            p.style.cssText = dim
+              ? `color:var(--muted);border-color:var(--border);background:transparent`
+              : `color:${ci.color};border-color:${ci.color}22;background:${ci.color}14`;
+            p.innerHTML = `<span class="pdot" style="background:${dim ? 'var(--muted)' : ci.color}"></span>${esc(ci.name)} · ${CARRIER_STATUS_LABEL[status]}`;
+            pills.appendChild(p);
+          });
+          bubble.appendChild(pills);
+          const loadRow = document.createElement('div');
+          loadRow.className = 'load-row';
+          loadRow.innerHTML = `<div class="spin"></div><span id="think-status">Reviewing carrier guidelines…</span>`;
+          bubble.appendChild(loadRow);
+          thinkStatus = loadRow.querySelector('#think-status');
           bodyBuilt = true;
+        } else if (eventType === 'thinking') {
+          if (thinkStatus) thinkStatus.textContent = data.text.trim().slice(-90) || 'Reviewing carrier guidelines…';
+          scrollB();
         } else if (eventType === 'delta') {
+          if (!txt) {
+            bubble.querySelector('.load-row')?.remove();
+            txt = document.createElement('div');
+            bubble.appendChild(txt);
+          }
           replyText += data.text;
-          if (txt) txt.innerHTML = renderMd(replyText);
+          txt.innerHTML = renderMd(replyText);
           scrollB();
         } else if (eventType === 'error') {
           throw new Error(data.error || 'Stream error');
@@ -457,8 +468,7 @@ async function send() {
       }
     }
     if (!bodyBuilt) throw new Error('Empty response');
-    history.push({ role: 'user', content: q });
-    history.push({ role: 'assistant', content: replyText });
+    if (!replyText) throw new Error('No analysis was returned');
   } catch (err) {
     bubble.innerHTML =
       `<span style="color:#E85D2F"><i class="ti ti-alert-circle"></i> ${esc(err.message)}</span>`;
