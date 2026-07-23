@@ -74,7 +74,7 @@ IMPORTANT RULES:
 // profile so we can find the relevant page in each carrier's documents.
 // This model NEVER produces the underwriting analysis itself -- that always
 // runs on claude-sonnet-5 below, with no fallback.
-const KEYWORD_SYSTEM = `Extract 3-10 short search terms for the medical conditions, impairments, tobacco use, or product types mentioned in this client profile, in the plain terminology an insurance underwriting guide would use. Include medical synonyms (e.g. for a TIA case, include "TIA", "transient ischemic attack", "stroke"). Do not include age, gender, dollar amounts, or names.
+const KEYWORD_SYSTEM = `Extract 3-10 short search terms for ONLY the medical conditions, impairments, and tobacco/nicotine use mentioned in this client profile, in the plain terminology an insurance underwriting guide would use. Include medical synonyms (e.g. for a TIA case, include "TIA", "transient ischemic attack", "stroke"). Do not include age, gender, height/weight, dollar amounts, names, or product types (e.g. never return terms like "whole life insurance" or "term insurance") -- those terms appear throughout every carrier's marketing text and will crowd out the actual medical impairment tables we're searching for.
 Return JSON only: {"kw":["term1","term2"]}`;
 
 const CARRIERS = ["fg", "foresters", "allianz", "transamerica"];
@@ -191,7 +191,7 @@ export default async function handler(req) {
       docSections.push(`\n\n=== ${name.toUpperCase()} ===\nNO GUIDELINES UPLOADED FOR THIS CARRIER.`);
       continue;
     }
-    const perSlotBudget = Math.max(3000, Math.floor(18000 / slotKeys.length));
+    const perSlotBudget = Math.max(4500, Math.floor(30000 / slotKeys.length));
     let anyMatched = false;
     const parts = [];
     for (const key of slotKeys) {
