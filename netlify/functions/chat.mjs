@@ -229,10 +229,18 @@ export default async function handler(req) {
     async start(controller) {
       controller.enqueue(sse("meta", { carrierStatus }));
       try {
+        // Thinking disabled: Netlify kills this function at a hard 60s wall-clock
+        // limit (confirmed via function logs), and adaptive thinking was consuming
+        // enough of that budget that the answer itself got cut off mid-generation
+        // on a full 4-carrier comparison. The model's analytical depth comes from
+        // claude-sonnet-5 + the system prompt, not from exposing separate thinking
+        // tokens, so disabling it trades invisible reasoning time for more of the
+        // 60s budget going toward the actual CLIENT SNAPSHOT/CARRIER ANALYSIS/
+        // RECOMMENDATION text.
         const anthropicStream = anthropic.messages.stream({
           model: "claude-sonnet-5",
-          max_tokens: 16000,
-          thinking: { type: "adaptive", display: "summarized" },
+          max_tokens: 8000,
+          thinking: { type: "disabled" },
           system: SYSTEM_PROMPT,
           messages,
         });
