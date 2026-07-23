@@ -208,7 +208,10 @@ export default async function handler(req) {
             stream: true,
           }),
         });
+        console.log("[chat] anthropic answer status:", res.status, "context chars:", contextBlock.length);
         if (!res.ok || !res.body) {
+          const bodyText = res.body ? await res.text() : "(no body)";
+          console.error("[chat] anthropic answer error body:", bodyText.slice(0, 2000));
           controller.enqueue(sse("error", { error: `Anthropic error: ${res.status}` }));
           controller.close();
           return;
@@ -216,6 +219,8 @@ export default async function handler(req) {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buf = "";
+        let deltaCount = 0;
+        const seenTypes = new Set();
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -227,13 +232,17 @@ export default async function handler(req) {
             if (!dataLine) continue;
             try {
               const parsed = JSON.parse(dataLine.slice(6));
+              seenTypes.add(parsed.type + (parsed.delta?.type ? `:${parsed.delta.type}` : ""));
               if (parsed.type === "content_block_delta" && parsed.delta?.type === "text_delta") {
                 controller.enqueue(sse("delta", { text: parsed.delta.text }));
+                deltaCount++;
               }
             } catch { /* ignore partial/non-JSON lines */ }
           }
         }
+        console.log("[chat] stream done. deltas sent:", deltaCount, "event types seen:", [...seenTypes].join(","));
       } catch (err) {
+        console.error("[chat] stream exception:", err.message);
         controller.enqueue(sse("error", { error: err.message }));
       }
       controller.close();
