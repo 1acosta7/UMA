@@ -29,7 +29,7 @@ async function checkAuth(authHeader) {
   await verifyToken(token, { secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
 }
 
-async function callAnthropic(system, messages, maxTokens = 256) {
+async function callAnthropic(system, messages, maxTokens = 256, model = "claude-opus-4-5") {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -38,7 +38,7 @@ async function callAnthropic(system, messages, maxTokens = 256) {
       "content-type": "application/json",
     },
     body: JSON.stringify({
-      model: "claude-opus-4-5",
+      model,
       max_tokens: maxTokens,
       system,
       messages,
@@ -82,7 +82,8 @@ export default async function handler(req) {
     const routeText = await callAnthropic(
       ROUTING_SYSTEM,
       [{ role: "user", content: question }],
-      500
+      500,
+      "claude-haiku-4-5"
     );
     const parsed = JSON.parse(routeText.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
     routing = parsed.r ?? [];
@@ -95,7 +96,7 @@ export default async function handler(req) {
   const docBlocks = [];
 
   const totalSlots = routing.reduce((n, r) => n + (r.s?.length ?? 0), 0);
-  const perDocLimit = Math.min(100000, Math.max(20000, Math.floor(400000 / Math.max(1, totalSlots))));
+  const perDocLimit = Math.min(60000, Math.max(15000, Math.floor(160000 / Math.max(1, totalSlots))));
 
   for (const route of routing) {
     const carrier = route.c;
