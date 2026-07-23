@@ -9,8 +9,13 @@ const CORS = {
 
 const ROUTING_SYSTEM = `You are an insurance underwriting router. Select the best carrier(s) and document slot(s).
 Routing logic: Health impairments → impairment guides. Non-med/exam-free → exam_free, accel_uw, nonmed. Final expense → fe_express, planright. Term life → trendsetter, main_uw. IUL/LIRP → uw_pathways, ffiul_ii, fciul_ii. Whole life/IBC → main_uw, main_uw_apr26. Foreign nationals → foreign_nat, immigration. Diabetes → diabetes. Military → natguard, afge. Athletes → athletes. APS → aps. Large face amounts → uw_financial.
-Return JSON only: {"r":[{"c":"carrier_id","s":["slot_id"],"note":"reason"}]}
-Max 2 carriers, max 2 slots each.`;
+Per-carrier general underwriting reference if nothing more specific fits: fg → impairment. foresters → main_uw. allianz → uw_guide. transamerica → trendsetter (term) or lifetime_wl (whole life).
+
+If the question asks broadly which carrier(s) to use, asks to compare carriers/options, or says things like "what carriers can we work with" / "which carrier is best" / "who can we place this with" — this is a CROSS-CARRIER COMPARISON. You MUST return all 4 carriers (fg, foresters, allianz, transamerica), each with 1-2 of their most relevant slots for this case, so a real comparison can be made. Do not narrow to just one or two carriers for these questions.
+
+For a narrow question about one specific product or carrier already named by the user, max 2 carriers, max 2 slots each.
+
+Return JSON only: {"r":[{"c":"carrier_id","s":["slot_id"],"note":"reason"}]}`;
 
 const ANSWER_SYSTEM = `You are a professional insurance underwriting assistant. Answer based ONLY on provided documents. Lead with direct answer. Cite exact document. Give precise numbers — face amounts, age bands, table ratings, flat extras. Note exceptions. If not found, say so.`;
 
@@ -73,7 +78,7 @@ export default async function handler(req) {
     const routeText = await callAnthropic(
       ROUTING_SYSTEM,
       [{ role: "user", content: question }],
-      256
+      500
     );
     const parsed = JSON.parse(routeText.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
     routing = parsed.r ?? [];
@@ -85,6 +90,9 @@ export default async function handler(req) {
   const searched = [];
   const docBlocks = [];
 
+  const totalSlots = routing.reduce((n, r) => n + (r.s?.length ?? 0), 0);
+  const perDocLimit = Math.min(100000, Math.max(20000, Math.floor(400000 / Math.max(1, totalSlots))));
+
   for (const route of routing) {
     const carrier = route.c;
     const slots = route.s ?? [];
@@ -94,7 +102,7 @@ export default async function handler(req) {
         const blob = await store.get(key, { type: "text" });
         if (blob) {
           searched.push(key);
-          docBlocks.push(`\n\n=== ${carrier.toUpperCase()} / ${slotId} ===\n${blob.slice(0, 100000)}`);
+          docBlocks.push(`\n\n=== ${carrier.toUpperCase()} / ${slotId} ===\n${blob.slice(0, perDocLimit)}`);
         }
       } catch { /* not uploaded yet */ }
     }
@@ -126,7 +134,7 @@ export default async function handler(req) {
     { role: "user", content: `${question}\n\n${contextBlock}` },
   ];
 
-  const reply = await callAnthropic(ANSWER_SYSTEM, messages, 2048);
+  const reply = await callAnthropic(ANSWER_SYSTEM, messages, 3072);
 
   return new Response(JSON.stringify({ reply, routing, searched }), {
     status: 200,
