@@ -96,7 +96,7 @@ export default async function handler(req) {
   const docBlocks = [];
 
   const totalSlots = routing.reduce((n, r) => n + (r.s?.length ?? 0), 0);
-  const perDocLimit = Math.min(60000, Math.max(15000, Math.floor(160000 / Math.max(1, totalSlots))));
+  const perDocLimit = Math.min(30000, Math.max(8000, Math.floor(60000 / Math.max(1, totalSlots))));
 
   for (const route of routing) {
     const carrier = route.c;
@@ -156,7 +156,7 @@ export default async function handler(req) {
           },
           body: JSON.stringify({
             model: "claude-opus-4-5",
-            max_tokens: 8000,
+            max_tokens: 4096,
             system: ANSWER_SYSTEM,
             messages,
             stream: true,
