@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign In — Uma</title>
+<script
+  src="https://clerk.askuma.io/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
+  data-clerk-publishable-key="pk_live_Y2xlcmsuYXNrdW1hLmlvJA"
+  crossorigin="anonymous">
+</script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #0B1220; min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
+.logo { font-size: 32px; font-weight: 700; background: linear-gradient(135deg, #378ADD, #1B9E5E); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 8px; }
+.tagline { font-size: 12px; color: #8CA2C0; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 32px; }
+#sign-in { width: 100%; max-width: 400px; }
+.back { margin-top: 24px; color: #8CA2C0; font-size: 13px; text-decoration: none; display: block; text-align: center; }
+.back:hover { color: #E8EDF5; }
+</style>
+</head>
+<body>
+<div class="logo">uma</div>
+<div class="tagline">Underwriting Made Accessible</div>
+<div id="sign-in"></div>
+<a href="/index.html" class="back">← Back to home</a>
+<script>
+window.addEventListener('load', async function() {
+  try {
+    await window.Clerk.load();
+    window.Clerk.mountSignIn(document.getElementById('sign-in'), {
+      appearance: {
+        variables: {
+          colorBackground: '#131F35',
+          colorInputBackground: '#1A2A45',
+          colorText: '#E8EDF5',
+          colorTextSecondary: '#8CA2C0',
+          colorPrimary: '#378ADD',
+          colorInputText: '#E8EDF5',
+          borderRadius: '8px'
+        }
+      },
+      afterSignInUrl: '/app.html',
+      afterSignUpUrl: '/app.html'
+    });
+  } catch(e) {
+    console.error('Clerk error:', e);
+    document.getElementById('sign-in').innerHTML = '<p style="color:#E03328;text-align:center;font-size:14px">Authentication failed: ' + e.message + '</p>';
+  }
+});
+</script>
+</body>
+</html>
