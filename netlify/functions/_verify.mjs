@@ -84,12 +84,24 @@ export async function runVerification() {
 
   // Orphaned: tracked/searchable under a carrier_slotId with no corresponding
   // upload anymore (e.g. the PDF was deleted but cleanup didn't fully run).
+  // A missing blob is NOT orphaned when ingestion_status shows table_page_count
+  // === 0 -- that's a 100%-narrative document, and _ingest.mjs intentionally
+  // deletes the carrier-docs blob for those since there's no table content
+  // worth keeping natively. That status row is proof of a correct, intentional
+  // absence, not a data-integrity gap.
   const blobKeySet = new Set(blobKeys);
   const orphanedKeys = new Set();
-  for (const key of actualCounts.keys()) if (!blobKeySet.has(key)) orphanedKeys.add(key);
+  for (const key of actualCounts.keys()) {
+    if (blobKeySet.has(key)) continue;
+    const status = statusByKey.get(key);
+    if (status && status.table_page_count === 0) continue;
+    orphanedKeys.add(key);
+  }
   for (const row of statusRows) {
     const key = `${row.carrier}_${row.slot_id}`;
-    if (!blobKeySet.has(key)) orphanedKeys.add(key);
+    if (blobKeySet.has(key)) continue;
+    if (row.table_page_count === 0) continue;
+    orphanedKeys.add(key);
   }
 
   const problems = results.filter((r) => r.state !== "ok");
