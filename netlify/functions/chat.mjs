@@ -386,12 +386,15 @@ export default async function handler(req) {
         // Thinking disabled: Netlify's function timeout leaves no room for
         // adaptive thinking's invisible reasoning phase on top of native PDF
         // processing -- see chat.mjs history for the earlier 60s timeout fix.
-        // Temperature near zero: underwriting calls should be deterministic
-        // and repeatable, not creative.
+        // NOTE: `temperature` is deprecated/rejected outright by claude-sonnet-5
+        // (confirmed via a live 400 "temperature is deprecated for this model")
+        // -- there is currently no sampling-temperature knob for this model, so
+        // determinism instead relies on thinking being disabled and the
+        // documents/system prompt being the same on every call for a given
+        // client, not an explicit temperature setting.
         const anthropicStream = anthropic.messages.stream({
           model: "claude-sonnet-5",
           max_tokens: 8000,
-          temperature: 0,
           thinking: { type: "disabled" },
           system: SYSTEM_PROMPT,
           messages,
