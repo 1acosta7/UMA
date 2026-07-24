@@ -226,9 +226,9 @@ export default async function handler(req) {
   if (!message?.trim()) return jsonError(400, "message is required");
 
   const anthropic = new Anthropic({ apiKey: Netlify.env.get("ANTHROPIC_API_KEY") });
-  const carrierStore = getStore("carrier-docs");
-  const clientStore = getStore("client-docs");
-  const convStore = getStore("conversations");
+  const carrierStore = getStore("carrier-docs", { consistency: "strong" });
+  const clientStore = getStore("client-docs", { consistency: "strong" });
+  const convStore = getStore("conversations", { consistency: "strong" });
 
   let record = await loadConversation(convStore, userId, conversationId);
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);

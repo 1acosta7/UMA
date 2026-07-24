@@ -62,7 +62,7 @@ export async function saveConversation(store, userId, conversationId, record) {
 // entry is instead its own blind write to a dedicated store, keyed uniquely,
 // so logging can never lose an entry to a conversation-record race.
 export async function logAccess(userId, conversationId, action) {
-  const store = getStore("access-log");
+  const store = getStore("access-log", { consistency: "strong" });
   const key = `${userId}/${conversationId}/${Date.now()}-${crypto.randomUUID()}`;
   try {
     await store.set(key, JSON.stringify({ userId, conversationId, action, timestamp: new Date().toISOString() }));
@@ -70,7 +70,7 @@ export async function logAccess(userId, conversationId, action) {
 }
 
 export async function readAccessLog(userId, conversationId) {
-  const store = getStore("access-log");
+  const store = getStore("access-log", { consistency: "strong" });
   try {
     const { blobs } = await store.list({ prefix: `${userId}/${conversationId}/` });
     const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));

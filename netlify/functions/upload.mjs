@@ -44,7 +44,7 @@ export default async function handler(req) {
   // Store the raw PDF bytes -- chat.mjs sends them to Claude as native PDF
   // document blocks so the model reads the actual table layout instead of a
   // flattened, column-ambiguous text extraction.
-  const store = getStore("carrier-docs");
+  const store = getStore("carrier-docs", { consistency: "strong" });
   const key = `${carrier}_${slotId}`;
   await store.set(key, buf, {
     metadata: { carrier, slotId, uploadedAt: new Date().toISOString() },

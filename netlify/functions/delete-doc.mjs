@@ -29,7 +29,7 @@ export default async function handler(req) {
     });
   }
 
-  const store = getStore("carrier-docs");
+  const store = getStore("carrier-docs", { consistency: "strong" });
   const key = `${carrier}_${slotId}`;
 
   try {

@@ -18,13 +18,13 @@ export default async function handler(req) {
   const { conversationId } = await req.json();
   if (!conversationId) return jsonError(400, "conversationId is required");
 
-  const convStore = getStore("conversations");
+  const convStore = getStore("conversations", { consistency: "strong" });
   const record = await loadConversation(convStore, userId, conversationId);
   if (!record || !record.turns || record.turns.length === 0) {
     return jsonError(404, "Conversation not found");
   }
 
-  const clientStore = getStore("client-docs");
+  const clientStore = getStore("client-docs", { consistency: "strong" });
   let clientDocs = [];
   try {
     const { blobs } = await clientStore.list({ prefix: clientDocPrefix(userId, conversationId) });
