@@ -93,7 +93,7 @@ async function extractTablePdf(buf, tablePageNumbers) {
 // those pages if the document is mixed), and chunk+embed narrative pages into
 // Supabase/pgvector. Returns a page-by-page classification report so the
 // upload response can show it for review.
-export async function ingestCarrierDoc({ carrier, slotId, slotLabel, buf }) {
+export async function ingestCarrierDoc({ carrier, slotId, slotLabel, filename, buf }) {
   const anthropic = new Anthropic({ apiKey: Netlify.env.get("ANTHROPIC_API_KEY") });
 
   const { text: pages } = await extractText(new Uint8Array(buf), { mergePages: false });
@@ -137,7 +137,7 @@ export async function ingestCarrierDoc({ carrier, slotId, slotLabel, buf }) {
   const chunkRows = [];
   for (const pageNum of narrativePageNumbers) {
     for (const content of chunkPage(pages[pageNum - 1])) {
-      chunkRows.push({ carrier, slot_id: slotId, slot_label: slotLabel, page_number: pageNum, content });
+      chunkRows.push({ carrier, slot_id: slotId, slot_label: slotLabel, source_filename: filename || null, page_number: pageNum, content });
     }
   }
 
@@ -154,8 +154,27 @@ export async function ingestCarrierDoc({ carrier, slotId, slotLabel, buf }) {
       if (error) throw new Error(error.message);
       chunksStored = rows.length;
     }
+
+    // Ingestion-status record: the source of truth the verification script
+    // reads to tell "this slot legitimately has zero narrative chunks
+    // because it's 100% table" apart from "this slot silently failed to
+    // index." Recorded even when narrativeError below ends up set, so a
+    // failure is visible rather than just absent.
+    await supabase.from("ingestion_status").upsert({
+      carrier, slot_id: slotId, slot_label: slotLabel, source_filename: filename || null,
+      table_page_count: tablePageNumbers.length, narrative_page_count: narrativePageNumbers.length,
+      chunk_count: chunksStored, narrative_error: null, ingested_at: new Date().toISOString(),
+    }, { onConflict: "carrier,slot_id" });
   } catch (err) {
     narrativeError = err.message;
+    try {
+      const supabase = createClient(Netlify.env.get("SUPABASE_URL"), Netlify.env.get("SUPABASE_SERVICE_KEY"));
+      await supabase.from("ingestion_status").upsert({
+        carrier, slot_id: slotId, slot_label: slotLabel, source_filename: filename || null,
+        table_page_count: tablePageNumbers.length, narrative_page_count: narrativePageNumbers.length,
+        chunk_count: chunksStored, narrative_error: narrativeError, ingested_at: new Date().toISOString(),
+      }, { onConflict: "carrier,slot_id" });
+    } catch { /* if even the status write fails, the upload response's narrativeError still surfaces it */ }
   }
 
   return {

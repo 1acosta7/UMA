@@ -5,3 +5,6 @@
   from = "/*"
   to = "/index.html"
   status = 200
+
+[[plugins]]
+  package = "./netlify-plugins/verify-index"

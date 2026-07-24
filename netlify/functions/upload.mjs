@@ -1,5 +1,6 @@
 import { SLOT_LABELS } from "./_shared.mjs";
 import { ingestCarrierDoc } from "./_ingest.mjs";
+import { runVerification } from "./_verify.mjs";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -16,7 +17,7 @@ export default async function handler(req) {
     });
   }
 
-  const { pin, carrier, slotId, data } = await req.json();
+  const { pin, carrier, slotId, data, filename } = await req.json();
 
   if (!pin || pin !== Netlify.env.get("ADMIN_PIN")) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -54,12 +55,20 @@ export default async function handler(req) {
   // query time instead of being sent as part of a native PDF block.
   let ingestResult;
   try {
-    ingestResult = await ingestCarrierDoc({ carrier, slotId, slotLabel, buf });
+    ingestResult = await ingestCarrierDoc({ carrier, slotId, slotLabel, filename, buf });
   } catch (err) {
     return new Response(JSON.stringify({ error: `Ingestion failed: ${err.message}` }), {
       status: 500, headers: { ...CORS, "Content-Type": "application/json" },
     });
   }
+
+  // Run the same verification check every time a file is added, not just on
+  // demand -- catches an indexing gap immediately rather than leaving it to
+  // be discovered later at query time.
+  let verification = null;
+  try {
+    verification = await runVerification();
+  } catch { /* verification failing shouldn't mask that the upload itself succeeded */ }
 
   return new Response(JSON.stringify({
     success: true,
@@ -69,6 +78,7 @@ export default async function handler(req) {
     narrativePageCount: ingestResult.narrativePageCount,
     chunkCount: ingestResult.chunkCount,
     narrativeError: ingestResult.narrativeError,
+    verification,
   }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },
   });

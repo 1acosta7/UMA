@@ -310,6 +310,17 @@
     }
     .report-tag.table { color: var(--accent); background: rgba(55,138,221,.12); }
     .report-tag.narrative { color: var(--green); background: rgba(27,158,94,.12); }
+    .verify-banner {
+      display: flex; align-items: center; gap: .5rem; padding: .65rem 1rem;
+      border-radius: 10px; font-size: .84rem; margin-bottom: 1.25rem; border: 1px solid;
+    }
+    .verify-banner.ok { color: var(--green); background: rgba(27,158,94,.08); border-color: rgba(27,158,94,.25); }
+    .verify-banner.warn { color: #E8A93B; background: rgba(232,169,59,.08); border-color: rgba(232,169,59,.3); }
+    .verify-banner.err { color: #E85D2F; background: rgba(232,93,47,.08); border-color: rgba(232,93,47,.3); }
+    .verify-banner button {
+      background: none; border: none; color: inherit; text-decoration: underline;
+      cursor: pointer; font-size: inherit; font-weight: 700; padding: 0;
+    }
     @media (max-width:600px) {
       header { padding: 0 1rem; } .tabs { padding: 0 1rem; }
       #user-name { display: none; }
@@ -407,15 +418,27 @@
 
     <div class="panel" id="panel-setup">
       <div class="setup-wrap">
-        <div class="setup-hd">
-          <h2>Document Management</h2>
-          <p>Upload and manage underwriting guides. Changes apply immediately for all agents.</p>
+        <div class="setup-hd" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem">
+          <div>
+            <h2>Document Management</h2>
+            <p>Upload and manage underwriting guides. Changes apply immediately for all agents.</p>
+          </div>
+          <button class="sbtn" id="verify-btn" onclick="runVerificationNow()" style="flex-shrink:0"><i class="ti ti-list-check"></i> Verify Index</button>
         </div>
+        <div class="verify-banner" id="verify-banner" style="display:none"></div>
         <div id="carrier-cards">
           <div class="load-row" style="padding:2rem 0"><div class="spin"></div> Loading…</div>
         </div>
       </div>
     </div>
+  </div>
+</div>
+
+<div class="overlay" id="verify-modal" style="display:none">
+  <div class="modal report-modal">
+    <h3><i class="ti ti-list-check"></i> Index Verification</h3>
+    <div id="verify-modal-body"></div>
+    <button class="pin-btn" onclick="closeVerifyModal()">Close</button>
   </div>
 </div>
 
@@ -809,7 +832,7 @@ async function doUp(e, cid, sid) {
     const b64 = await toB64(file);
     const res = await fetch('/.netlify/functions/upload', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ pin, carrier:cid, slotId:sid, data:b64 }),
+      body: JSON.stringify({ pin, carrier:cid, slotId:sid, data:b64, filename:file.name }),
     });
     if (res.status===401) { pin=null; toast('Incorrect PIN','err'); showPin(); return; }
     const j = await res.json();
@@ -838,9 +861,90 @@ function showClassificationReport(filename, data) {
     warnEl.style.display = 'none';
   }
   document.getElementById('report-modal').style.display = 'flex';
+  // The upload just ran a full index verification automatically -- surface
+  // it right away rather than making the admin dig for it separately.
+  if (data.verification) renderVerifyBanner(data.verification);
 }
 
 function closeReport() { document.getElementById('report-modal').style.display = 'none'; }
+
+function renderVerifyBanner(v) {
+  const el = document.getElementById('verify-banner');
+  if (!el) return;
+  if (v.error) {
+    el.innerHTML = `<i class="ti ti-alert-circle"></i> Verification check failed to run: ${esc(v.error)}`;
+    el.className = 'verify-banner err';
+  } else if (v.ok) {
+    el.innerHTML = `<i class="ti ti-circle-check"></i> Index verified — all ${v.totalDocuments} uploaded documents accounted for.`;
+    el.className = 'verify-banner ok';
+  } else {
+    const n = v.problems.length + v.orphaned.length;
+    el.innerHTML = `<i class="ti ti-alert-triangle"></i> ${n} issue${n===1?'':'s'} found in the index — <button onclick="openVerifyModal()">view details</button>`;
+    el.className = 'verify-banner warn';
+  }
+  el.style.display = 'flex';
+  window.__lastVerification = v;
+}
+
+async function runVerificationNow() {
+  const btn = document.getElementById('verify-btn');
+  if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spin"></div> Verifying…'; }
+  try {
+    const res = await fetch('/.netlify/functions/verify-index', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin }),
+    });
+    if (res.status === 401) { pin = null; toast('Incorrect PIN', 'err'); showPin(); return; }
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || 'Verification failed');
+    renderVerifyBanner(j);
+    openVerifyModal();
+  } catch (err) {
+    toast(err.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-list-check"></i> Verify Index'; }
+  }
+}
+
+function openVerifyModal() {
+  const v = window.__lastVerification;
+  if (!v) return;
+  const body = document.getElementById('verify-modal-body');
+  if (v.error) {
+    body.innerHTML = `<p class="pin-err" style="display:block">${esc(v.error)}</p>`;
+  } else {
+    let html = `<p style="color:var(--muted);font-size:.85rem;margin-bottom:1rem">${v.okCount} of ${v.totalDocuments} uploaded documents fully verified. Checked ${new Date(v.checkedAt).toLocaleString()}.</p>`;
+    if (v.problems.length) {
+      html += `<h4 style="font-size:.85rem;margin-bottom:.5rem">Documents needing attention</h4><div class="report-pages" style="margin-bottom:1rem">`;
+      html += v.problems.map(p => `<div class="report-page-row">
+        <span>${esc(p.carrier)}_${esc(p.slotId)} — ${esc(p.slotLabel)}${p.sourceFilename ? ` (${esc(p.sourceFilename)})` : ''}</span>
+        <span class="report-tag" style="color:#E85D2F;background:rgba(232,93,47,.12)">${esc(verifyStateLabel(p.state))}</span>
+      </div>`).join('');
+      html += `</div>`;
+    }
+    if (v.orphaned.length) {
+      html += `<h4 style="font-size:.85rem;margin-bottom:.5rem">Orphaned entries (indexed but no matching upload)</h4><div class="report-pages">`;
+      html += v.orphaned.map(k => `<div class="report-page-row"><span>${esc(k)}</span></div>`).join('');
+      html += `</div>`;
+    }
+    if (!v.problems.length && !v.orphaned.length) {
+      html += `<p style="color:var(--green)"><i class="ti ti-circle-check"></i> No issues found.</p>`;
+    }
+    body.innerHTML = html;
+  }
+  document.getElementById('verify-modal').style.display = 'flex';
+}
+
+function verifyStateLabel(state) {
+  return {
+    needs_reindex: 'Never indexed — re-upload',
+    failed: 'Indexing failed',
+    missing_chunks: 'No searchable chunks found',
+    count_mismatch: 'Chunk count mismatch',
+  }[state] || state;
+}
+
+function closeVerifyModal() { document.getElementById('verify-modal').style.display = 'none'; }
 
 async function delDoc(cid, sid) {
   if (!confirm('Remove this document? Agents will no longer be able to search it.')) return;

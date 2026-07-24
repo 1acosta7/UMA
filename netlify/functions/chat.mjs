@@ -239,7 +239,10 @@ async function buildNarrativeGuidanceBlocks(queryText) {
 
     narrativeStatus[carrier] = "matched";
     const cited = matches
-      .map((m) => `[${name} — ${m.slot_label || m.slot_id}, page ${m.page_number}]: ${m.content}`)
+      .map((m) => {
+        const doc = m.source_filename ? `${m.slot_label || m.slot_id} (${m.source_filename})` : (m.slot_label || m.slot_id);
+        return `[${name} — ${doc}, page ${m.page_number}]: ${m.content}`;
+      })
       .join("\n\n");
     contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()} NARRATIVE GUIDANCE (via search) ===\n${cited}` });
   }
