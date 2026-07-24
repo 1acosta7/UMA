@@ -2,7 +2,7 @@ import { getStore } from "@netlify/blobs";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   CORS, jsonError, requireUser, looksLikePdf, clientDocPrefix,
-  loadConversation, saveConversation, logAccess,
+  loadConversation, saveConversation, logAccess, readAccessLog,
 } from "./_shared.mjs";
 
 // Verbatim, unmodified per the operator's Claude Project system prompt.
@@ -289,7 +289,7 @@ export default async function handler(req) {
 
     messages = [{ role: "user", content: [...contentBlocks, { type: "text", text: message }] }];
 
-    record = record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [], accessLog: [] };
+    record = record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [] };
   } else {
     // ---- Follow-up: reconstruct the established thread deterministically ----
     carrierStatus = { ...record.carrierStatus };
@@ -312,7 +312,7 @@ export default async function handler(req) {
   if (debug) {
     return new Response(JSON.stringify({
       isFollowUp, carrierStatus, firstMessageBlockCount: messages[0].content.length, turnsSoFar: record.turns.length,
-      accessLog: record.accessLog,
+      accessLog: await readAccessLog(userId, conversationId),
     }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
@@ -355,15 +355,14 @@ export default async function handler(req) {
         record.clientDocKeys = clientDocKeysForRecord;
         record.turns.push({ role: "assistant", text: replyText });
         if (!record.label) record.label = deriveLabel(record.profileText, replyText);
-        logAccess(record, userId, "analysis");
       } else {
         record.turns.push({ role: "user", text: message });
         record.turns.push({ role: "assistant", text: replyText });
-        logAccess(record, userId, "followup");
       }
       try {
         await saveConversation(convStore, userId, conversationId, record);
       } catch { /* if persistence fails, the reply still reached the user */ }
+      await logAccess(userId, conversationId, isFollowUp ? "followup" : "analysis");
 
       controller.close();
     },

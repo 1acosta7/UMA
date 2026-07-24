@@ -37,17 +37,16 @@ export default async function handler(req) {
   const key = `${clientDocPrefix(userId, conversationId)}${docId}`;
   await clientStore.set(key, buf, { metadata: { userId, conversationId, filename, uploadedAt } });
 
-  // Log the upload against the conversation record even if analysis hasn't
-  // run yet -- create a bare stub if this is the first thing to happen in
-  // this conversation. chat.mjs fills the rest in once analysis actually runs.
+  // Ensure a stub conversation record exists even if analysis hasn't run yet,
+  // so the doc's conversationId has somewhere to belong. chat.mjs fills the
+  // rest in once analysis actually runs.
   const convStore = getStore("conversations");
   let record = await loadConversation(convStore, userId, conversationId);
   if (!record) {
-    record = { id: conversationId, userId, createdAt: uploadedAt, turns: [], accessLog: [] };
+    record = { id: conversationId, userId, createdAt: uploadedAt, turns: [] };
+    await saveConversation(convStore, userId, conversationId, record);
   }
-  logAccess(record, userId, "upload");
-  record.updatedAt = uploadedAt;
-  await saveConversation(convStore, userId, conversationId, record);
+  await logAccess(userId, conversationId, "upload");
 
   return new Response(JSON.stringify({ success: true, docId, key, filename, uploadedAt }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },

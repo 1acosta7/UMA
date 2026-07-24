@@ -1,7 +1,7 @@
 import { getStore } from "@netlify/blobs";
 import {
   CORS, jsonError, requireUser, clientDocPrefix,
-  loadConversation, saveConversation, logAccess,
+  loadConversation, logAccess,
 } from "./_shared.mjs";
 
 export default async function handler(req) {
@@ -35,8 +35,9 @@ export default async function handler(req) {
   } catch { /* no client docs */ }
 
   // Reopening a client's thread is itself a document access -- log it.
-  logAccess(record, userId, "view");
-  await saveConversation(convStore, userId, conversationId, record);
+  // Independent write, not a mutation of `record` -- viewing a thread should
+  // never need to re-save the conversation record itself.
+  await logAccess(userId, conversationId, "view");
 
   return new Response(JSON.stringify({
     id: record.id,

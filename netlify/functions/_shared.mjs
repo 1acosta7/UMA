@@ -1,4 +1,5 @@
 import { verifyToken } from "@clerk/backend";
+import { getStore } from "@netlify/blobs";
 
 export const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -53,10 +54,28 @@ export async function saveConversation(store, userId, conversationId, record) {
 }
 
 // Lightweight, non-compliance-grade paper trail: who touched this client's
-// documents, doing what, and when. Lives inline on the conversation record
-// rather than a separate audit store, per explicit instruction that this is
-// a placeholder pending real compliance infrastructure.
-export function logAccess(record, userId, action) {
-  if (!record.accessLog) record.accessLog = [];
-  record.accessLog.push({ userId, action, timestamp: new Date().toISOString() });
+// documents, doing what, and when. Deliberately NOT stored as a field on the
+// conversation record -- that record is read-modify-written on every call
+// (load, mutate turns, save), and two calls landing close together (e.g.
+// reopening a thread right as a follow-up is being sent) can race, with the
+// second save silently clobbering the first's accessLog entry. Each log
+// entry is instead its own blind write to a dedicated store, keyed uniquely,
+// so logging can never lose an entry to a conversation-record race.
+export async function logAccess(userId, conversationId, action) {
+  const store = getStore("access-log");
+  const key = `${userId}/${conversationId}/${Date.now()}-${crypto.randomUUID()}`;
+  try {
+    await store.set(key, JSON.stringify({ userId, conversationId, action, timestamp: new Date().toISOString() }));
+  } catch { /* audit logging must never block the underlying operation */ }
+}
+
+export async function readAccessLog(userId, conversationId) {
+  const store = getStore("access-log");
+  try {
+    const { blobs } = await store.list({ prefix: `${userId}/${conversationId}/` });
+    const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));
+    return entries.filter(Boolean).map((t) => JSON.parse(t)).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  } catch {
+    return [];
+  }
 }
