@@ -76,7 +76,11 @@ async function embedBatch(openai, texts) {
 }
 
 async function extractTablePdf(buf, tablePageNumbers) {
-  const src = await PDFDocument.load(buf);
+  // Several carrier guides ship with basic PDF permission restrictions
+  // ("Producer Use Only" viewer locks, no real content encryption) --
+  // pdf-lib refuses to load those without this flag even though there's
+  // nothing to decrypt.
+  const src = await PDFDocument.load(buf, { ignoreEncryption: true });
   const dest = await PDFDocument.create();
   const indices = tablePageNumbers.map((n) => n - 1);
   const copied = await dest.copyPages(src, indices);
