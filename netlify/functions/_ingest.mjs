@@ -111,8 +111,18 @@ export async function ingestCarrierDoc({ carrier, slotId, slotLabel, buf }) {
   if (tablePageNumbers.length === pages.length) {
     await carrierStore.set(key, buf, { metadata: { carrier, slotId, uploadedAt: new Date().toISOString() } });
   } else if (tablePageNumbers.length > 0) {
-    const sliced = await extractTablePdf(buf, tablePageNumbers);
-    await carrierStore.set(key, sliced, { metadata: { carrier, slotId, uploadedAt: new Date().toISOString(), slicedPages: tablePageNumbers.join(",") } });
+    // pdf-lib's page-copying occasionally chokes on a document's internal
+    // structure (seen live: "Expected instance of PDFDict, but got instance
+    // of undefined") independent of anything about the content itself. Fall
+    // back to storing the full original PDF rather than losing the table
+    // pages entirely -- worse than a precise slice (a few extra narrative
+    // pages ride along in the native block) but far better than failing.
+    try {
+      const sliced = await extractTablePdf(buf, tablePageNumbers);
+      await carrierStore.set(key, sliced, { metadata: { carrier, slotId, uploadedAt: new Date().toISOString(), slicedPages: tablePageNumbers.join(",") } });
+    } catch {
+      await carrierStore.set(key, buf, { metadata: { carrier, slotId, uploadedAt: new Date().toISOString(), sliceFailed: "true" } });
+    }
   } else {
     // Purely narrative document -- no native block worth keeping. Remove any
     // stale entry from a prior upload so it stops being offered as a table doc.
