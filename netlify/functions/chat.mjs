@@ -361,7 +361,9 @@ export default async function handler(req) {
       }
       try {
         await saveConversation(convStore, userId, conversationId, record);
-      } catch { /* if persistence fails, the reply still reached the user */ }
+      } catch (err) {
+        controller.enqueue(sse("error", { error: `SAVE FAILED (diagnostic): ${err.message}` }));
+      }
       await logAccess(userId, conversationId, isFollowUp ? "followup" : "analysis");
 
       controller.close();
