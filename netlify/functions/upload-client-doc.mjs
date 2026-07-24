@@ -33,14 +33,14 @@ export default async function handler(req) {
 
   const docId = crypto.randomUUID();
   const uploadedAt = new Date().toISOString();
-  const clientStore = getStore("client-docs", { consistency: "strong" });
+  const clientStore = getStore({ name: "client-docs", consistency: "strong" });
   const key = `${clientDocPrefix(userId, conversationId)}${docId}`;
   await clientStore.set(key, buf, { metadata: { userId, conversationId, filename, uploadedAt } });
 
   // Ensure a stub conversation record exists even if analysis hasn't run yet,
   // so the doc's conversationId has somewhere to belong. chat.mjs fills the
   // rest in once analysis actually runs.
-  const convStore = getStore("conversations", { consistency: "strong" });
+  const convStore = getStore({ name: "conversations", consistency: "strong" });
   let record = await loadConversation(convStore, userId, conversationId);
   if (!record) {
     record = { id: conversationId, userId, createdAt: uploadedAt, turns: [] };

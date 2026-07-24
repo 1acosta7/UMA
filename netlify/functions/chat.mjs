@@ -226,9 +226,9 @@ export default async function handler(req) {
   if (!message?.trim()) return jsonError(400, "message is required");
 
   const anthropic = new Anthropic({ apiKey: Netlify.env.get("ANTHROPIC_API_KEY") });
-  const carrierStore = getStore("carrier-docs", { consistency: "strong" });
-  const clientStore = getStore("client-docs", { consistency: "strong" });
-  const convStore = getStore("conversations", { consistency: "strong" });
+  const carrierStore = getStore({ name: "carrier-docs", consistency: "strong" });
+  const clientStore = getStore({ name: "client-docs", consistency: "strong" });
+  const convStore = getStore({ name: "conversations", consistency: "strong" });
 
   let record = await loadConversation(convStore, userId, conversationId);
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);
@@ -361,9 +361,7 @@ export default async function handler(req) {
       }
       try {
         await saveConversation(convStore, userId, conversationId, record);
-      } catch (err) {
-        controller.enqueue(sse("error", { error: `SAVE FAILED (diagnostic): ${err.message}` }));
-      }
+      } catch { /* if persistence fails, the reply still reached the user */ }
       await logAccess(userId, conversationId, isFollowUp ? "followup" : "analysis");
 
       controller.close();

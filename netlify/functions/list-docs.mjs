@@ -30,7 +30,7 @@ export default async function handler(req) {
     });
   }
 
-  const store = getStore("carrier-docs", { consistency: "strong" });
+  const store = getStore({ name: "carrier-docs", consistency: "strong" });
   let keys = [];
   try {
     const { blobs } = await store.list();

@@ -12,7 +12,7 @@ export default async function handler(req) {
     return jsonError(401, "Unauthorized");
   }
 
-  const store = getStore("conversations", { consistency: "strong" });
+  const store = getStore({ name: "conversations", consistency: "strong" });
   let keys = [];
   try {
     const { blobs } = await store.list({ prefix: `${userId}/` });
