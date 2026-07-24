@@ -312,6 +312,7 @@ export default async function handler(req) {
   if (debug) {
     return new Response(JSON.stringify({
       isFollowUp, carrierStatus, firstMessageBlockCount: messages[0].content.length, turnsSoFar: record.turns.length,
+      accessLog: record.accessLog,
     }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
