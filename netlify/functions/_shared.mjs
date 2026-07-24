@@ -30,6 +30,46 @@ export function looksLikePdf(bytes) {
   return bytes.length > 5 && String.fromCharCode(...bytes.slice(0, 5)) === "%PDF-";
 }
 
+export const CARRIERS = ["fg", "foresters", "allianz", "transamerica"];
+export const CARRIER_NAMES = { fg: "F&G", foresters: "Foresters", allianz: "Allianz", transamerica: "Transamerica" };
+
+export const SLOT_LABELS = {
+  fg: {
+    telephone_uw: "Life UW Telephone Interview Guide",
+    exam_free: "Exam-Free Underwriting Guide",
+    impairment: "Impairment Field UW Guide",
+    afge: "AFGE (federal employees union) Field UW Guide",
+    natguard: "National Guard Field UW Guide",
+    foreign_nat: "Foreign National UW Categories",
+  },
+  foresters: {
+    main_uw: "Main UW Guide (Your Term, Strong Foundation, Advantage Plus II, SMART UL)",
+    main_uw_apr26: "Main UW Guide — Apr 2026 Edition",
+    accel_uw: "Accelerated UW Program Guide",
+    nonmed: "Non-Med Platform Worksheet (product overview, not an impairment guide)",
+    diabetes: "Diabetes Ratings for Non-Med Business",
+    immigration: "Immigration Guidelines for Non-US Citizens",
+    brightfuture: "BrightFuture Children's Whole Life UW Guide (juvenile applicants only)",
+    planright: "PlanRight Medical Reference Guide",
+  },
+  allianz: {
+    uw_guide: "Underwriting Guidelines",
+    uw_financial: "Underwriting Guidelines — Financial (large face amounts / high net worth)",
+    uw_pathways: "Underwriting Pathways",
+    aps: "APS Ordering Guidelines (process document, not medical decisions)",
+    athletes: "Professional Athletes UW Guidelines",
+    accel: "Accelerated UW Program Brochure",
+  },
+  transamerica: {
+    fe_express: "FE Express Solution Agent & UW Guide (final expense)",
+    trendsetter: "Trendsetter Term Life Agent & UW Guide",
+    lifetime_wl: "Lifetime Whole Life UW Field Guide",
+    ffiul_ii: "FFIUL II Express Agent & UW Guide (IUL)",
+    fciul_ii: "FCIUL II Agent Guide (IUL)",
+    foreign_nat: "Foreign National ITIN UW Guidelines",
+  },
+};
+
 export function conversationKey(userId, conversationId) {
   return `${userId}/${conversationId}`;
 }

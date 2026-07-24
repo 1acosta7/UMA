@@ -1,9 +1,14 @@
 import { getStore } from "@netlify/blobs";
 import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js";
 import {
   CORS, jsonError, requireUser, looksLikePdf, clientDocPrefix,
   loadConversation, saveConversation, logAccess, readAccessLog,
+  CARRIERS, CARRIER_NAMES, SLOT_LABELS,
 } from "./_shared.mjs";
+
+const EMBEDDING_MODEL = "text-embedding-3-small";
 
 // Verbatim, unmodified per the operator's Claude Project system prompt.
 const SYSTEM_PROMPT = `You are my personal life insurance underwriting assistant. I am a licensed life insurance professional. Your job is to help me determine which carriers will approve my clients and at what rate class, based on their health profile.
@@ -72,46 +77,6 @@ IMPORTANT RULES:
 // The system prompt's own "use this structure every time" line would
 // otherwise fight the requirement that follow-ups be free-form.
 const FOLLOWUP_PREFIX = "(Follow-up question on this same client -- a direct, free-form answer is fine, no need to repeat the full CLIENT SNAPSHOT/CARRIER ANALYSIS/RECOMMENDATION format for this.)";
-
-const CARRIERS = ["fg", "foresters", "allianz", "transamerica"];
-const CARRIER_NAMES = { fg: "F&G", foresters: "Foresters", allianz: "Allianz", transamerica: "Transamerica" };
-
-const SLOT_LABELS = {
-  fg: {
-    telephone_uw: "Life UW Telephone Interview Guide",
-    exam_free: "Exam-Free Underwriting Guide",
-    impairment: "Impairment Field UW Guide",
-    afge: "AFGE (federal employees union) Field UW Guide",
-    natguard: "National Guard Field UW Guide",
-    foreign_nat: "Foreign National UW Categories",
-  },
-  foresters: {
-    main_uw: "Main UW Guide (Your Term, Strong Foundation, Advantage Plus II, SMART UL)",
-    main_uw_apr26: "Main UW Guide — Apr 2026 Edition",
-    accel_uw: "Accelerated UW Program Guide",
-    nonmed: "Non-Med Platform Worksheet (product overview, not an impairment guide)",
-    diabetes: "Diabetes Ratings for Non-Med Business",
-    immigration: "Immigration Guidelines for Non-US Citizens",
-    brightfuture: "BrightFuture Children's Whole Life UW Guide (juvenile applicants only)",
-    planright: "PlanRight Medical Reference Guide",
-  },
-  allianz: {
-    uw_guide: "Underwriting Guidelines",
-    uw_financial: "Underwriting Guidelines — Financial (large face amounts / high net worth)",
-    uw_pathways: "Underwriting Pathways",
-    aps: "APS Ordering Guidelines (process document, not medical decisions)",
-    athletes: "Professional Athletes UW Guidelines",
-    accel: "Accelerated UW Program Brochure",
-  },
-  transamerica: {
-    fe_express: "FE Express Solution Agent & UW Guide (final expense)",
-    trendsetter: "Trendsetter Term Life Agent & UW Guide",
-    lifetime_wl: "Lifetime Whole Life UW Field Guide",
-    ffiul_ii: "FFIUL II Express Agent & UW Guide (IUL)",
-    fciul_ii: "FCIUL II Agent Guide (IUL)",
-    foreign_nat: "Foreign National ITIN UW Guidelines",
-  },
-};
 
 // Narrow, disclosed auxiliary step: given the client profile and the list of
 // documents actually uploaded per carrier, pick which ones are worth sending
@@ -209,6 +174,79 @@ async function buildClientDocBlocks(store, userId, conversationId) {
   return { contentBlocks, keys };
 }
 
+// Runs once, at the initial analysis call: embeds the client profile and
+// searches each carrier's narrative-guidance chunks in Supabase/pgvector
+// (the hybrid pipeline's non-tabular content -- process guidance, exclusion
+// criteria, eligibility rules -- table-heavy content never enters this
+// store at all, see _ingest.mjs). Results are persisted onto the record as
+// plain text and simply replayed on follow-ups, so a follow-up never
+// re-queries and the context a client's thread was analyzed against never
+// silently drifts if the corpus changes later.
+async function buildNarrativeGuidanceBlocks(queryText) {
+  const contentBlocks = [];
+  const narrativeStatus = {};
+
+  let supabase, openai;
+  try {
+    supabase = createClient(Netlify.env.get("SUPABASE_URL"), Netlify.env.get("SUPABASE_SERVICE_KEY"));
+    openai = new OpenAI({ apiKey: Netlify.env.get("OPENAI_API_KEY") });
+  } catch {
+    for (const carrier of CARRIERS) narrativeStatus[carrier] = "none";
+    return { contentBlocks, narrativeStatus };
+  }
+
+  let queryEmbedding;
+  try {
+    const res = await openai.embeddings.create({ model: EMBEDDING_MODEL, input: [queryText] });
+    queryEmbedding = res.data[0].embedding;
+  } catch {
+    for (const carrier of CARRIERS) narrativeStatus[carrier] = "none";
+    return { contentBlocks, narrativeStatus };
+  }
+
+  for (const carrier of CARRIERS) {
+    const name = CARRIER_NAMES[carrier];
+    let hasAny = false;
+    try {
+      const { data } = await supabase.from("guideline_chunks").select("id").eq("carrier", carrier).limit(1);
+      hasAny = (data?.length || 0) > 0;
+    } catch { /* treat as none uploaded */ }
+
+    if (!hasAny) {
+      narrativeStatus[carrier] = "none";
+      continue;
+    }
+
+    let matches = [];
+    try {
+      const { data } = await supabase.rpc("match_guideline_chunks", {
+        query_embedding: queryEmbedding, match_carrier: carrier, match_count: 6,
+      });
+      matches = data || [];
+    } catch { matches = []; }
+
+    if (matches.length === 0) {
+      // Hard fallback rule: guidelines ARE uploaded for this carrier, but
+      // nothing matched this client's specific conditions -- say so
+      // explicitly rather than silently omitting the carrier or guessing.
+      narrativeStatus[carrier] = "no_match";
+      contentBlocks.push({
+        type: "text",
+        text: `\n\n=== ${name.toUpperCase()}: NARRATIVE GUIDANCE IS UPLOADED FOR THIS CARRIER, BUT NO SPECIFIC GUIDANCE MATCHED THIS CLIENT'S STATED CONDITIONS ===`,
+      });
+      continue;
+    }
+
+    narrativeStatus[carrier] = "matched";
+    const cited = matches
+      .map((m) => `[${name} — ${m.slot_label || m.slot_id}, page ${m.page_number}]: ${m.content}`)
+      .join("\n\n");
+    contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()} NARRATIVE GUIDANCE (via search) ===\n${cited}` });
+  }
+
+  return { contentBlocks, narrativeStatus };
+}
+
 export default async function handler(req) {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
@@ -233,7 +271,7 @@ export default async function handler(req) {
   let record = await loadConversation(convStore, userId, conversationId);
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);
 
-  let contentBlocks, carrierStatus, messages, selectedForRecord, clientDocKeysForRecord;
+  let contentBlocks, tableStatus, narrativeStatus, mergedStatus, messages, selectedForRecord, clientDocKeysForRecord, narrativeBlocksTextForRecord;
 
   if (!isFollowUp) {
     // ---- Initial analysis: discover, select, and load documents ----
@@ -243,15 +281,15 @@ export default async function handler(req) {
       allKeys = blobs.map((b) => b.key).sort();
     } catch { /* store empty or unavailable */ }
 
-    carrierStatus = {};
+    tableStatus = {};
     const available = {};
     for (const carrier of CARRIERS) {
       const slotKeys = allKeys.filter((k) => k.startsWith(`${carrier}_`));
       if (slotKeys.length === 0) {
-        carrierStatus[carrier] = "none";
+        tableStatus[carrier] = "none";
         continue;
       }
-      carrierStatus[carrier] = "uploaded";
+      tableStatus[carrier] = "uploaded";
       available[carrier] = slotKeys.map((k) => {
         const slotId = k.slice(carrier.length + 1);
         return { id: slotId, label: SLOT_LABELS[carrier]?.[slotId] || slotId };
@@ -280,7 +318,12 @@ export default async function handler(req) {
     }
     selectedForRecord = selected;
 
-    contentBlocks = await buildCarrierContentBlocks(carrierStore, selected, carrierStatus);
+    contentBlocks = await buildCarrierContentBlocks(carrierStore, selected, tableStatus);
+    const { contentBlocks: narrativeBlocks, narrativeStatus: nStatus } = await buildNarrativeGuidanceBlocks(message);
+    narrativeStatus = nStatus;
+    narrativeBlocksTextForRecord = narrativeBlocks.map((b) => b.text);
+    contentBlocks.push(...narrativeBlocks);
+
     const { contentBlocks: clientBlocks, keys: clientKeys } = await buildClientDocBlocks(clientStore, userId, conversationId);
     contentBlocks.push(...clientBlocks);
     clientDocKeysForRecord = clientKeys;
@@ -292,8 +335,15 @@ export default async function handler(req) {
     record = record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [] };
   } else {
     // ---- Follow-up: reconstruct the established thread deterministically ----
-    carrierStatus = { ...record.carrierStatus };
-    contentBlocks = await buildCarrierContentBlocks(carrierStore, record.carrierSelection || {}, carrierStatus);
+    tableStatus = { ...record.tableStatus };
+    narrativeStatus = { ...record.narrativeStatus };
+    contentBlocks = await buildCarrierContentBlocks(carrierStore, record.carrierSelection || {}, tableStatus);
+    // Narrative guidance is never re-queried on a follow-up -- replay the
+    // exact text the initial analysis was actually generated against.
+    for (const text of record.narrativeBlocksText || []) {
+      contentBlocks.push({ type: "text", text });
+    }
+
     const { contentBlocks: clientBlocks } = await buildClientDocBlocks(clientStore, userId, conversationId);
     contentBlocks.push(...clientBlocks);
     if (contentBlocks.length) contentBlocks[contentBlocks.length - 1].cache_control = { type: "ephemeral" };
@@ -309,9 +359,18 @@ export default async function handler(req) {
     messages.push({ role: "user", content: `${FOLLOWUP_PREFIX}\n\n${message}` });
   }
 
+  // A carrier only reads as "nothing uploaded" if BOTH the table-doc side
+  // and the narrative-search side are empty for it -- either one alone is
+  // enough to count as "checked" for display purposes.
+  mergedStatus = {};
+  for (const carrier of CARRIERS) {
+    mergedStatus[carrier] = (tableStatus[carrier] !== "none" || narrativeStatus[carrier] !== "none") ? "uploaded" : "none";
+  }
+
   if (debug) {
     return new Response(JSON.stringify({
-      isFollowUp, carrierStatus, firstMessageBlockCount: messages[0].content.length, turnsSoFar: record.turns.length,
+      isFollowUp, tableStatus, narrativeStatus, mergedStatus,
+      firstMessageBlockCount: messages[0].content.length, turnsSoFar: record.turns.length,
       accessLog: await readAccessLog(userId, conversationId),
     }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
@@ -321,15 +380,18 @@ export default async function handler(req) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      if (!isFollowUp) controller.enqueue(sse("meta", { carrierStatus }));
+      if (!isFollowUp) controller.enqueue(sse("meta", { carrierStatus: mergedStatus }));
       let replyText = "";
       try {
         // Thinking disabled: Netlify's function timeout leaves no room for
         // adaptive thinking's invisible reasoning phase on top of native PDF
         // processing -- see chat.mjs history for the earlier 60s timeout fix.
+        // Temperature near zero: underwriting calls should be deterministic
+        // and repeatable, not creative.
         const anthropicStream = anthropic.messages.stream({
           model: "claude-sonnet-5",
           max_tokens: 8000,
+          temperature: 0,
           thinking: { type: "disabled" },
           system: SYSTEM_PROMPT,
           messages,
@@ -351,7 +413,10 @@ export default async function handler(req) {
       if (!isFollowUp) {
         record.profileText = message;
         record.carrierSelection = selectedForRecord;
-        record.carrierStatus = carrierStatus;
+        record.tableStatus = tableStatus;
+        record.narrativeStatus = narrativeStatus;
+        record.narrativeBlocksText = narrativeBlocksTextForRecord;
+        record.carrierStatus = mergedStatus;
         record.clientDocKeys = clientDocKeysForRecord;
         record.turns.push({ role: "assistant", text: replyText });
         if (!record.label) record.label = deriveLabel(record.profileText, replyText);

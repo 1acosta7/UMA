@@ -1,4 +1,5 @@
 import { getStore } from "@netlify/blobs";
+import { createClient } from "@supabase/supabase-js";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -35,6 +36,13 @@ export default async function handler(req) {
   try {
     await store.delete(key);
   } catch { /* key may not exist, that's fine */ }
+
+  // Also clear any narrative chunks ingested from this document -- otherwise
+  // vector search keeps surfacing citations for a document that's been removed.
+  try {
+    const supabase = createClient(Netlify.env.get("SUPABASE_URL"), Netlify.env.get("SUPABASE_SERVICE_KEY"));
+    await supabase.rpc("delete_guideline_chunks", { match_carrier: carrier, match_slot_id: slotId });
+  } catch { /* Supabase not configured or unreachable -- blob deletion still succeeded */ }
 
   return new Response(JSON.stringify({ success: true, key }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },

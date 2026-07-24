@@ -1,4 +1,5 @@
-import { getStore } from "@netlify/blobs";
+import { SLOT_LABELS } from "./_shared.mjs";
+import { ingestCarrierDoc } from "./_ingest.mjs";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -41,16 +42,34 @@ export default async function handler(req) {
     });
   }
 
-  // Store the raw PDF bytes -- chat.mjs sends them to Claude as native PDF
-  // document blocks so the model reads the actual table layout instead of a
-  // flattened, column-ambiguous text extraction.
-  const store = getStore({ name: "carrier-docs", consistency: "strong" });
   const key = `${carrier}_${slotId}`;
-  await store.set(key, buf, {
-    metadata: { carrier, slotId, uploadedAt: new Date().toISOString() },
-  });
+  const slotLabel = SLOT_LABELS[carrier]?.[slotId] || slotId;
 
-  return new Response(JSON.stringify({ success: true, key }), {
+  // Hybrid ingestion: classify every page as table-heavy or narrative.
+  // Table-heavy content is stored under this same key as a native PDF (see
+  // _ingest.mjs for how it decides between the full document and a sliced
+  // table-pages-only PDF) so chat.mjs's existing document-block logic reads
+  // it exactly like before -- no changes needed there. Narrative content is
+  // chunked, embedded, and stored in Supabase/pgvector for retrieval at
+  // query time instead of being sent as part of a native PDF block.
+  let ingestResult;
+  try {
+    ingestResult = await ingestCarrierDoc({ carrier, slotId, slotLabel, buf });
+  } catch (err) {
+    return new Response(JSON.stringify({ error: `Ingestion failed: ${err.message}` }), {
+      status: 500, headers: { ...CORS, "Content-Type": "application/json" },
+    });
+  }
+
+  return new Response(JSON.stringify({
+    success: true,
+    key,
+    classification: ingestResult.report,
+    tablePageCount: ingestResult.tablePageCount,
+    narrativePageCount: ingestResult.narrativePageCount,
+    chunkCount: ingestResult.chunkCount,
+    narrativeError: ingestResult.narrativeError,
+  }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },
   });
 }

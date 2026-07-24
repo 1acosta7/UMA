@@ -288,6 +288,28 @@
       border-radius: 50%; animation: spin .7s linear infinite;
     }
     .auth-screen p { color: var(--muted); font-size: .88rem; }
+    .report-modal { max-width: 460px; }
+    .report-summary { display: flex; gap: .6rem; margin-bottom: 1rem; }
+    .report-stat {
+      flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: .7rem; text-align: center;
+    }
+    .report-stat .n { font-size: 1.3rem; font-weight: 800; }
+    .report-stat .l { font-size: .68rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: .15rem; }
+    .report-pages {
+      max-height: 240px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px;
+      margin-bottom: 1.25rem;
+    }
+    .report-page-row {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: .4rem .8rem; font-size: .8rem; border-bottom: 1px solid var(--border);
+    }
+    .report-page-row:last-child { border-bottom: none; }
+    .report-tag {
+      font-size: .68rem; font-weight: 700; padding: .1rem .5rem; border-radius: 999px;
+    }
+    .report-tag.table { color: var(--accent); background: rgba(55,138,221,.12); }
+    .report-tag.narrative { color: var(--green); background: rgba(27,158,94,.12); }
     @media (max-width:600px) {
       header { padding: 0 1rem; } .tabs { padding: 0 1rem; }
       #user-name { display: none; }
@@ -310,6 +332,21 @@
     <input type="password" id="pin-in" class="pin-in" placeholder="••••••" autocomplete="off" />
     <div class="pin-err" id="pin-err">Incorrect PIN. Try again.</div>
     <button class="pin-btn" onclick="doUnlock()"><i class="ti ti-lock-open"></i> Unlock</button>
+  </div>
+</div>
+
+<div class="overlay" id="report-modal" style="display:none">
+  <div class="modal report-modal">
+    <h3><i class="ti ti-list-check"></i> Classification report</h3>
+    <p id="report-filename">How this document was split between native PDF (tables) and searchable text (narrative).</p>
+    <div class="report-summary">
+      <div class="report-stat"><div class="n" id="report-table-count">0</div><div class="l">Table pages</div></div>
+      <div class="report-stat"><div class="n" id="report-narrative-count">0</div><div class="l">Narrative pages</div></div>
+      <div class="report-stat"><div class="n" id="report-chunk-count">0</div><div class="l">Chunks embedded</div></div>
+    </div>
+    <div class="report-pages" id="report-pages"></div>
+    <p class="pin-err" id="report-warning" style="display:none"></p>
+    <button class="pin-btn" onclick="closeReport()">Got it</button>
   </div>
 </div>
 
@@ -767,7 +804,7 @@ async function doUp(e, cid, sid) {
   const file = e.target.files?.[0]; e.target.value = '';
   if (!file) return;
   if (file.size > 4.5*1024*1024) { toast('File exceeds 4.5 MB limit','err'); return; }
-  toast('Uploading…','info');
+  toast('Uploading and classifying pages…','info');
   try {
     const b64 = await toB64(file);
     const res = await fetch('/.netlify/functions/upload', {
@@ -775,11 +812,35 @@ async function doUp(e, cid, sid) {
       body: JSON.stringify({ pin, carrier:cid, slotId:sid, data:b64 }),
     });
     if (res.status===401) { pin=null; toast('Incorrect PIN','err'); showPin(); return; }
-    if (!res.ok) throw new Error((await res.json()).error||'Upload failed');
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error||'Upload failed');
     toast(`Uploaded: ${file.name}`,'ok');
     await loadDocs();
+    showClassificationReport(file.name, j);
   } catch(err) { toast(err.message,'err'); }
 }
+
+function showClassificationReport(filename, data) {
+  document.getElementById('report-filename').textContent =
+    `${filename} — how this document was split between native PDF (tables) and searchable text (narrative).`;
+  document.getElementById('report-table-count').textContent = data.tablePageCount ?? 0;
+  document.getElementById('report-narrative-count').textContent = data.narrativePageCount ?? 0;
+  document.getElementById('report-chunk-count').textContent = data.chunkCount ?? 0;
+  const pagesEl = document.getElementById('report-pages');
+  pagesEl.innerHTML = (data.classification || []).map(p =>
+    `<div class="report-page-row"><span>Page ${p.page}</span><span class="report-tag ${p.type}">${p.type === 'table' ? 'Table' : 'Narrative'}</span></div>`
+  ).join('') || '<div class="report-page-row"><span>No page data returned</span></div>';
+  const warnEl = document.getElementById('report-warning');
+  if (data.narrativeError) {
+    warnEl.style.display = 'block';
+    warnEl.textContent = `Narrative pages were classified but could not be embedded for search: ${data.narrativeError}. The table pages above are already live; check the Supabase/OpenAI setup and re-upload to enable narrative search for this document.`;
+  } else {
+    warnEl.style.display = 'none';
+  }
+  document.getElementById('report-modal').style.display = 'flex';
+}
+
+function closeReport() { document.getElementById('report-modal').style.display = 'none'; }
 
 async function delDoc(cid, sid) {
   if (!confirm('Remove this document? Agents will no longer be able to search it.')) return;
