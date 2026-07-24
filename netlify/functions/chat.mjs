@@ -1,12 +1,9 @@
 import { getStore } from "@netlify/blobs";
-import { verifyToken } from "@clerk/backend";
 import Anthropic from "@anthropic-ai/sdk";
-
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+import {
+  CORS, jsonError, requireUser, looksLikePdf, clientDocPrefix,
+  loadConversation, saveConversation, logAccess,
+} from "./_shared.mjs";
 
 // Verbatim, unmodified per the operator's Claude Project system prompt.
 const SYSTEM_PROMPT = `You are my personal life insurance underwriting assistant. I am a licensed life insurance professional. Your job is to help me determine which carriers will approve my clients and at what rate class, based on their health profile.
@@ -70,12 +67,15 @@ IMPORTANT RULES:
 - Never guarantee approval — frame everything as "likely" or "based on guidelines"
 - If I haven't uploaded guidelines for a carrier yet, tell me rather than guessing`;
 
+// Applied only to the USER turn of a follow-up question, never to the
+// protected system prompt above (which must stay byte-for-byte verbatim).
+// The system prompt's own "use this structure every time" line would
+// otherwise fight the requirement that follow-ups be free-form.
+const FOLLOWUP_PREFIX = "(Follow-up question on this same client -- a direct, free-form answer is fine, no need to repeat the full CLIENT SNAPSHOT/CARRIER ANALYSIS/RECOMMENDATION format for this.)";
+
 const CARRIERS = ["fg", "foresters", "allianz", "transamerica"];
 const CARRIER_NAMES = { fg: "F&G", foresters: "Foresters", allianz: "Allianz", transamerica: "Transamerica" };
 
-// Human-readable labels for each uploaded slot, mirrored from the Setup tab's
-// CARRIERS config in app.html. Used only for the document-selection step below
-// -- the model never sees these labels, only the actual PDFs it selects.
 const SLOT_LABELS = {
   fg: {
     telephone_uw: "Life UW Telephone Interview Guide",
@@ -115,13 +115,10 @@ const SLOT_LABELS = {
 
 // Narrow, disclosed auxiliary step: given the client profile and the list of
 // documents actually uploaded per carrier, pick which ones are worth sending
-// in full. This model NEVER produces the underwriting analysis itself -- that
-// always runs on claude-sonnet-5 below, with no fallback. Sending every
-// uploaded document for every carrier regardless of relevance would blow past
-// both the context window and the function's time budget, so this step exists
-// purely to bound size -- it is deliberately biased toward over-including
-// rather than under-including, since a missed document produces a wrong
-// underwriting call while an extra one only costs a bit of context.
+// in full. Runs once, at the start of a conversation -- the selection then
+// stays fixed for the life of that conversation (mid-conversation carrier
+// expansion is intentionally out of scope). This model NEVER produces the
+// underwriting analysis itself -- that always runs on claude-sonnet-5 below.
 const DOC_SELECT_SYSTEM = `You are selecting which underwriting guideline documents to load for a specific client scenario, given a list of documents actually available per carrier.
 Rules:
 - Always include documents that are general/main underwriting guides, impairment guides, or medical reference guides -- these contain the core condition-to-rate-class decision tables and apply to nearly every case.
@@ -130,92 +127,21 @@ Rules:
 - If you are unsure whether a document applies, include it. Omitting a relevant document produces a wrong underwriting call; including an extra one only costs a bit of context.
 Return JSON only: {"carrier_id": ["slotId1","slotId2"], ...} -- one array per carrier that has at least one available document, using the exact slot IDs given.`;
 
-async function checkAuth(authHeader) {
-  const token = (authHeader || "").replace("Bearer ", "").trim();
-  if (!token) throw new Error("Missing token");
-  await verifyToken(token, { secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
+function deriveLabel(profileText, replyText) {
+  const m = replyText.match(/-\s*Name \(or initials\):\s*(.+)/i);
+  const name = m?.[1]?.trim();
+  const dateStr = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
+  if (name && !/^_+$/.test(name)) return `${name} — ${dateStr}`;
+  const snippet = profileText.trim().replace(/\s+/g, " ").slice(0, 40);
+  return `${snippet}${profileText.length > 40 ? "…" : ""} — ${dateStr}`;
 }
 
-export default async function handler(req) {
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-
-  try {
-    await checkAuth(req.headers.get("authorization"));
-  } catch {
-    return new Response(JSON.stringify({ error: "Unauthorized" }), {
-      status: 401, headers: { ...CORS, "Content-Type": "application/json" },
-    });
-  }
-
-  if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405, headers: { ...CORS, "Content-Type": "application/json" },
-    });
-  }
-
-  const { profile, debug } = await req.json();
-  if (!profile?.trim()) {
-    return new Response(JSON.stringify({ error: "Client profile is required" }), {
-      status: 400, headers: { ...CORS, "Content-Type": "application/json" },
-    });
-  }
-
-  const anthropic = new Anthropic({ apiKey: Netlify.env.get("ANTHROPIC_API_KEY") });
-  const store = getStore("carrier-docs");
-
-  // Step 1: figure out what's actually uploaded, keyed by carrier.
-  let allKeys = [];
-  try {
-    const { blobs } = await store.list();
-    allKeys = blobs.map((b) => b.key).sort();
-  } catch { /* store empty or unavailable */ }
-
-  const carrierStatus = {};
-  const available = {}; // carrier -> [{id, label}]
-  for (const carrier of CARRIERS) {
-    const slotKeys = allKeys.filter((k) => k.startsWith(`${carrier}_`));
-    if (slotKeys.length === 0) {
-      carrierStatus[carrier] = "none";
-      continue;
-    }
-    carrierStatus[carrier] = "uploaded";
-    available[carrier] = slotKeys.map((k) => {
-      const slotId = k.slice(carrier.length + 1);
-      return { id: slotId, label: SLOT_LABELS[carrier]?.[slotId] || slotId };
-    });
-  }
-
-  // Step 2: pick which of the available documents to actually load in full,
-  // per DOC_SELECT_SYSTEM above (claude-haiku-4-5, selection only).
-  let selected = {};
-  if (Object.keys(available).length > 0) {
-    try {
-      const selMsg = await anthropic.messages.create({
-        model: "claude-haiku-4-5",
-        max_tokens: 1000,
-        system: DOC_SELECT_SYSTEM,
-        messages: [
-          {
-            role: "user",
-            content: `CLIENT PROFILE:\n${profile}\n\nAVAILABLE DOCUMENTS PER CARRIER:\n${JSON.stringify(available, null, 2)}`,
-          },
-        ],
-      });
-      const selText = selMsg.content?.[0]?.text ?? "";
-      selected = JSON.parse(selText.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
-    } catch {
-      // If selection fails for any reason, fall back to everything available
-      // rather than silently sending nothing.
-      for (const carrier of Object.keys(available)) {
-        selected[carrier] = available[carrier].map((d) => d.id);
-      }
-    }
-  }
-
-  // Step 3: fetch the selected PDFs as raw bytes and build native document
-  // blocks -- Claude reads the actual table layout instead of a flattened,
-  // column-ambiguous text extraction. Citations are enabled so page-level
-  // citations in the answer are grounded in the real document, not guessed.
+// Builds native PDF document blocks for a carrier's selected guideline slots,
+// validating each blob actually looks like a PDF (guards against stale
+// entries from a prior storage format) and gracefully downgrading a carrier
+// to "none" if every one of its selected docs turns out invalid, rather than
+// failing the whole request.
+async function buildCarrierContentBlocks(store, slotIdsByCarrier, carrierStatus) {
   const contentBlocks = [];
   for (const carrier of CARRIERS) {
     const name = CARRIER_NAMES[carrier];
@@ -223,20 +149,15 @@ export default async function handler(req) {
       contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()}: NO GUIDELINES UPLOADED FOR THIS CARRIER ===` });
       continue;
     }
-    const slotIds = selected[carrier]?.length ? selected[carrier] : available[carrier].map((d) => d.id);
+    const slotIds = slotIdsByCarrier[carrier] || [];
     const docBlocks = [];
     for (const slotId of slotIds) {
       const key = `${carrier}_${slotId}`;
       try {
         const buf = await store.get(key, { type: "arrayBuffer" });
         if (!buf) continue;
-        // Guard against stale entries from the previous text-extraction pipeline
-        // (which stored plain text, not PDF bytes, under these same keys) --
-        // skip anything that isn't actually a PDF rather than sending Claude
-        // invalid document data and failing the whole request.
         const bytes = new Uint8Array(buf);
-        const looksLikePdf = bytes.length > 5 && String.fromCharCode(...bytes.slice(0, 5)) === "%PDF-";
-        if (!looksLikePdf) continue;
+        if (!looksLikePdf(bytes)) continue;
         docBlocks.push({
           type: "document",
           source: { type: "base64", media_type: "application/pdf", data: Buffer.from(buf).toString("base64") },
@@ -253,42 +174,158 @@ export default async function handler(req) {
     contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()} GUIDELINE DOCUMENTS ===` });
     contentBlocks.push(...docBlocks);
   }
-  // Cache breakpoint on the last static block: the document set only changes
-  // when someone uploads/deletes a file, so repeated requests within the
-  // cache TTL reuse this processing instead of re-reading every PDF.
-  if (contentBlocks.length) {
-    contentBlocks[contentBlocks.length - 1].cache_control = { type: "ephemeral" };
+  return contentBlocks;
+}
+
+// Client medical documents are immutable once uploaded (no mid-conversation
+// attach in v1), so re-listing this prefix always yields the same set on
+// every call -- initial or follow-up -- with no extra bookkeeping needed.
+async function buildClientDocBlocks(store, userId, conversationId) {
+  const contentBlocks = [];
+  const keys = [];
+  let blobs = [];
+  try {
+    ({ blobs } = await store.list({ prefix: clientDocPrefix(userId, conversationId) }));
+  } catch { /* no client docs */ }
+  if (blobs.length === 0) return { contentBlocks, keys };
+
+  contentBlocks.push({ type: "text", text: "\n\n=== CLIENT-PROVIDED MEDICAL DOCUMENTS ===" });
+  for (const b of blobs) {
+    try {
+      const buf = await store.get(b.key, { type: "arrayBuffer" });
+      if (!buf) continue;
+      const bytes = new Uint8Array(buf);
+      if (!looksLikePdf(bytes)) continue;
+      const filename = b.metadata?.filename || b.key.split("/").pop();
+      contentBlocks.push({
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: Buffer.from(buf).toString("base64") },
+        title: `Client Document — ${filename}`,
+        citations: { enabled: true },
+      });
+      keys.push(b.key);
+    } catch { /* skip unreadable doc */ }
+  }
+  return { contentBlocks, keys };
+}
+
+export default async function handler(req) {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+
+  let userId;
+  try {
+    userId = await requireUser(req.headers.get("authorization"));
+  } catch {
+    return jsonError(401, "Unauthorized");
+  }
+
+  if (req.method !== "POST") return jsonError(405, "Method not allowed");
+
+  const { conversationId, message, debug } = await req.json();
+  if (!conversationId) return jsonError(400, "conversationId is required");
+  if (!message?.trim()) return jsonError(400, "message is required");
+
+  const anthropic = new Anthropic({ apiKey: Netlify.env.get("ANTHROPIC_API_KEY") });
+  const carrierStore = getStore("carrier-docs");
+  const clientStore = getStore("client-docs");
+  const convStore = getStore("conversations");
+
+  let record = await loadConversation(convStore, userId, conversationId);
+  const isFollowUp = !!(record && record.turns && record.turns.length > 0);
+
+  let contentBlocks, carrierStatus, messages, selectedForRecord, clientDocKeysForRecord;
+
+  if (!isFollowUp) {
+    // ---- Initial analysis: discover, select, and load documents ----
+    let allKeys = [];
+    try {
+      const { blobs } = await carrierStore.list();
+      allKeys = blobs.map((b) => b.key).sort();
+    } catch { /* store empty or unavailable */ }
+
+    carrierStatus = {};
+    const available = {};
+    for (const carrier of CARRIERS) {
+      const slotKeys = allKeys.filter((k) => k.startsWith(`${carrier}_`));
+      if (slotKeys.length === 0) {
+        carrierStatus[carrier] = "none";
+        continue;
+      }
+      carrierStatus[carrier] = "uploaded";
+      available[carrier] = slotKeys.map((k) => {
+        const slotId = k.slice(carrier.length + 1);
+        return { id: slotId, label: SLOT_LABELS[carrier]?.[slotId] || slotId };
+      });
+    }
+
+    let selected = {};
+    if (Object.keys(available).length > 0) {
+      try {
+        const selMsg = await anthropic.messages.create({
+          model: "claude-haiku-4-5",
+          max_tokens: 1000,
+          system: DOC_SELECT_SYSTEM,
+          messages: [{
+            role: "user",
+            content: `CLIENT PROFILE:\n${message}\n\nAVAILABLE DOCUMENTS PER CARRIER:\n${JSON.stringify(available, null, 2)}`,
+          }],
+        });
+        const selText = selMsg.content?.[0]?.text ?? "";
+        selected = JSON.parse(selText.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+      } catch {
+        for (const carrier of Object.keys(available)) {
+          selected[carrier] = available[carrier].map((d) => d.id);
+        }
+      }
+    }
+    selectedForRecord = selected;
+
+    contentBlocks = await buildCarrierContentBlocks(carrierStore, selected, carrierStatus);
+    const { contentBlocks: clientBlocks, keys: clientKeys } = await buildClientDocBlocks(clientStore, userId, conversationId);
+    contentBlocks.push(...clientBlocks);
+    clientDocKeysForRecord = clientKeys;
+
+    if (contentBlocks.length) contentBlocks[contentBlocks.length - 1].cache_control = { type: "ephemeral" };
+
+    messages = [{ role: "user", content: [...contentBlocks, { type: "text", text: message }] }];
+
+    record = record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [], accessLog: [] };
+  } else {
+    // ---- Follow-up: reconstruct the established thread deterministically ----
+    carrierStatus = { ...record.carrierStatus };
+    contentBlocks = await buildCarrierContentBlocks(carrierStore, record.carrierSelection || {}, carrierStatus);
+    const { contentBlocks: clientBlocks } = await buildClientDocBlocks(clientStore, userId, conversationId);
+    contentBlocks.push(...clientBlocks);
+    if (contentBlocks.length) contentBlocks[contentBlocks.length - 1].cache_control = { type: "ephemeral" };
+
+    messages = [{ role: "user", content: [...contentBlocks, { type: "text", text: record.profileText }] }];
+    for (const t of record.turns) {
+      messages.push({ role: t.role, content: [{ type: "text", text: t.text }] });
+    }
+    // Cache everything established so far -- only the new question below is fresh.
+    const lastMsg = messages[messages.length - 1];
+    lastMsg.content[lastMsg.content.length - 1].cache_control = { type: "ephemeral" };
+
+    messages.push({ role: "user", content: `${FOLLOWUP_PREFIX}\n\n${message}` });
   }
 
   if (debug) {
-    return new Response(JSON.stringify({ available, selected, carrierStatus, blockCount: contentBlocks.length }), {
-      status: 200, headers: { ...CORS, "Content-Type": "application/json" },
-    });
+    return new Response(JSON.stringify({
+      isFollowUp, carrierStatus, firstMessageBlockCount: messages[0].content.length, turnsSoFar: record.turns.length,
+    }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
-
-  // Step 4: analysis -- always claude-sonnet-5, no fallback to a cheaper model.
-  const messages = [
-    {
-      role: "user",
-      content: [...contentBlocks, { type: "text", text: profile }],
-    },
-  ];
 
   const encoder = new TextEncoder();
   const sse = (event, data) => encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 
   const stream = new ReadableStream({
     async start(controller) {
-      controller.enqueue(sse("meta", { carrierStatus }));
+      if (!isFollowUp) controller.enqueue(sse("meta", { carrierStatus }));
+      let replyText = "";
       try {
-        // Thinking disabled: Netlify kills this function at a hard 60s wall-clock
-        // limit (confirmed via function logs), and adaptive thinking was consuming
-        // enough of that budget that the answer itself got cut off mid-generation
-        // on a full 4-carrier comparison. The model's analytical depth comes from
-        // claude-sonnet-5 + the system prompt, not from exposing separate thinking
-        // tokens, so disabling it trades invisible reasoning time for more of the
-        // 60s budget going toward the actual CLIENT SNAPSHOT/CARRIER ANALYSIS/
-        // RECOMMENDATION text.
+        // Thinking disabled: Netlify's function timeout leaves no room for
+        // adaptive thinking's invisible reasoning phase on top of native PDF
+        // processing -- see chat.mjs history for the earlier 60s timeout fix.
         const anthropicStream = anthropic.messages.stream({
           model: "claude-sonnet-5",
           max_tokens: 8000,
@@ -297,17 +334,36 @@ export default async function handler(req) {
           messages,
         });
         for await (const event of anthropicStream) {
-          if (event.type === "content_block_delta") {
-            if (event.delta.type === "text_delta") {
-              controller.enqueue(sse("delta", { text: event.delta.text }));
-            } else if (event.delta.type === "thinking_delta") {
-              controller.enqueue(sse("thinking", { text: event.delta.thinking }));
-            }
+          if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+            replyText += event.delta.text;
+            controller.enqueue(sse("delta", { text: event.delta.text }));
           }
         }
       } catch (err) {
         controller.enqueue(sse("error", { error: err.message }));
+        controller.close();
+        return;
       }
+
+      const now = new Date().toISOString();
+      record.updatedAt = now;
+      if (!isFollowUp) {
+        record.profileText = message;
+        record.carrierSelection = selectedForRecord;
+        record.carrierStatus = carrierStatus;
+        record.clientDocKeys = clientDocKeysForRecord;
+        record.turns.push({ role: "assistant", text: replyText });
+        if (!record.label) record.label = deriveLabel(record.profileText, replyText);
+        logAccess(record, userId, "analysis");
+      } else {
+        record.turns.push({ role: "user", text: message });
+        record.turns.push({ role: "assistant", text: replyText });
+        logAccess(record, userId, "followup");
+      }
+      try {
+        await saveConversation(convStore, userId, conversationId, record);
+      } catch { /* if persistence fails, the reply still reached the user */ }
+
       controller.close();
     },
   });
