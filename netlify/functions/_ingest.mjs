@@ -163,7 +163,7 @@ export async function ingestCarrierDoc({ carrier, slotId, slotLabel, filename, b
     await supabase.from("ingestion_status").upsert({
       carrier, slot_id: slotId, slot_label: slotLabel, source_filename: filename || null,
       table_page_count: tablePageNumbers.length, narrative_page_count: narrativePageNumbers.length,
-      chunk_count: chunksStored, narrative_error: null, ingested_at: new Date().toISOString(),
+      chunk_count: chunksStored, narrative_error: null, page_report: report, ingested_at: new Date().toISOString(),
     }, { onConflict: "carrier,slot_id" });
   } catch (err) {
     narrativeError = err.message;
@@ -172,7 +172,7 @@ export async function ingestCarrierDoc({ carrier, slotId, slotLabel, filename, b
       await supabase.from("ingestion_status").upsert({
         carrier, slot_id: slotId, slot_label: slotLabel, source_filename: filename || null,
         table_page_count: tablePageNumbers.length, narrative_page_count: narrativePageNumbers.length,
-        chunk_count: chunksStored, narrative_error: narrativeError, ingested_at: new Date().toISOString(),
+        chunk_count: chunksStored, narrative_error: narrativeError, page_report: report, ingested_at: new Date().toISOString(),
       }, { onConflict: "carrier,slot_id" });
     } catch { /* if even the status write fails, the upload response's narrativeError still surfaces it */ }
   }

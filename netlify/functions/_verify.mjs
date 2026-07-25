@@ -91,6 +91,7 @@ export async function runVerification() {
       recordedChunkCount: status?.chunk_count ?? null,
       actualChunkCount: actualChunks,
       hasNativeBlob: hasBlob,
+      pageReport: status?.page_report ?? null,
       state,
     });
   }
