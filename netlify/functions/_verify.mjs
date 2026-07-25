@@ -47,13 +47,23 @@ export async function runVerification() {
     return { ok: false, error: `Could not read guideline_chunks: ${err.message}`, checkedAt: new Date().toISOString() };
   }
 
+  // Every carrier_slotId that's tracked anywhere -- has a native PDF blob,
+  // an ingestion_status row, or searchable chunks -- must appear in the
+  // report. Iterating blobKeys alone silently drops 100%-narrative documents
+  // (which correctly have no blob) from totalDocuments/okCount entirely,
+  // rather than just from the orphan check: a doc iterated by blobKeys is
+  // the only way it every reaches `results`, so those documents were never
+  // being verified as "ok" -- they just weren't being reported on at all.
+  const allKeys = new Set([...blobKeys, ...statusByKey.keys(), ...actualCounts.keys()]);
+
   const results = [];
-  for (const key of blobKeys) {
+  for (const key of allKeys) {
     const underscoreIdx = key.indexOf("_");
     const carrier = key.slice(0, underscoreIdx);
     const slotId = key.slice(underscoreIdx + 1);
     const status = statusByKey.get(key);
     const actualChunks = actualCounts.get(key) || 0;
+    const hasBlob = blobKeys.includes(key);
 
     let state;
     if (!status) {
@@ -66,6 +76,8 @@ export async function runVerification() {
       state = "missing_chunks"; // claimed narrative content, nothing searchable
     } else if (status.chunk_count !== actualChunks) {
       state = "count_mismatch"; // recorded count and actual stored count disagree
+    } else if (status.table_page_count > 0 && !hasBlob) {
+      state = "missing_blob"; // claimed table content, no native PDF block to show for it
     } else {
       state = "ok";
     }
@@ -78,40 +90,24 @@ export async function runVerification() {
       narrativePageCount: status?.narrative_page_count ?? null,
       recordedChunkCount: status?.chunk_count ?? null,
       actualChunkCount: actualChunks,
+      hasNativeBlob: hasBlob,
       state,
     });
   }
 
-  // Orphaned: tracked/searchable under a carrier_slotId with no corresponding
-  // upload anymore (e.g. the PDF was deleted but cleanup didn't fully run).
-  // A missing blob is NOT orphaned when ingestion_status shows table_page_count
-  // === 0 -- that's a 100%-narrative document, and _ingest.mjs intentionally
-  // deletes the carrier-docs blob for those since there's no table content
-  // worth keeping natively. That status row is proof of a correct, intentional
-  // absence, not a data-integrity gap.
-  const blobKeySet = new Set(blobKeys);
-  const orphanedKeys = new Set();
-  for (const key of actualCounts.keys()) {
-    if (blobKeySet.has(key)) continue;
-    const status = statusByKey.get(key);
-    if (status && status.table_page_count === 0) continue;
-    orphanedKeys.add(key);
-  }
-  for (const row of statusRows) {
-    const key = `${row.carrier}_${row.slot_id}`;
-    if (blobKeySet.has(key)) continue;
-    if (row.table_page_count === 0) continue;
-    orphanedKeys.add(key);
-  }
-
+  // "orphaned" is kept as a field (rather than removed) for the build
+  // plugin/UI, which already read it -- now just the missing_blob subset of
+  // `problems`, computed once instead of by a second, separately-maintained
+  // pass over the same three data sources.
   const problems = results.filter((r) => r.state !== "ok");
+  const orphaned = results.filter((r) => r.state === "missing_blob").map((r) => r.key);
   return {
-    ok: problems.length === 0 && orphanedKeys.size === 0,
+    ok: problems.length === 0,
     totalDocuments: results.length,
     okCount: results.length - problems.length,
     documents: results,
     problems,
-    orphaned: [...orphanedKeys],
+    orphaned,
     checkedAt: new Date().toISOString(),
   };
 }
