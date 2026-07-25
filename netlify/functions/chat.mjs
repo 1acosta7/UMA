@@ -309,7 +309,6 @@ export default async function handler(req) {
     // retrieval, not the part causing bloated context/output.
     let selected = {};
     let tierByCarrier = {};
-    let triageContext = null;
     if (Object.keys(available).length > 0) {
       try {
         const triageMsg = await anthropic.messages.create({
@@ -327,9 +326,14 @@ export default async function handler(req) {
           selected[carrier] = info.docs || [];
           tierByCarrier[carrier] = info.tier === "narrative_only" ? "narrative_only" : "full";
         }
-        if (parsed.bindingConstraint || parsed.caseType) {
-          triageContext = `\n\n=== CASE TRIAGE ===\nBinding constraint(s): ${parsed.bindingConstraint || "none identified"}\nCase type: ${parsed.caseType || "unspecified"}\n(Your own judgment on the guideline text below governs the final call -- this is a starting point, not a conclusion.)`;
-        }
+        // Deliberately NOT passed into the final call as context: the triage
+        // model's bindingConstraint/caseType read is a retrieval-gating aid
+        // only, never something claude-sonnet-5 should cite or defer to --
+        // it isn't guideline text and doing so undermines the "every claim
+        // traces to guideline text" rule. (An earlier version of this code
+        // injected it as a "=== CASE TRIAGE ===" block; the model echoed
+        // that header verbatim into user-visible output and treated it as
+        // an authority independent of the actual retrieved documents.)
       } catch {
         // Triage failed -- fail open exactly like the doc-selection step
         // always did: load every available doc, full tier, for every
@@ -344,7 +348,6 @@ export default async function handler(req) {
     tierForRecord = tierByCarrier;
 
     contentBlocks = await buildCarrierContentBlocks(carrierStore, selected, tableStatus, tierByCarrier);
-    if (triageContext) contentBlocks.unshift({ type: "text", text: triageContext });
     const { contentBlocks: narrativeBlocks, narrativeStatus: nStatus } = await buildNarrativeGuidanceBlocks(message);
     narrativeStatus = nStatus;
     narrativeBlocksTextForRecord = narrativeBlocks.map((b) => b.text);
