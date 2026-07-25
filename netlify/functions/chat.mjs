@@ -10,7 +10,6 @@ import {
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
 
-// Verbatim, unmodified per the operator's Claude Project system prompt.
 const SYSTEM_PROMPT = `You are my personal life insurance underwriting assistant. I am a licensed life insurance professional. Your job is to help me determine which carriers will approve my clients and at what rate class, based on their health profile.
 
 ---
@@ -31,66 +30,59 @@ I have uploaded underwriting guidelines for the following carriers and products 
 
 ---
 
-WHAT YOU WILL DO:
-1. Review the client profile I provide
-2. Cross-reference against each carrier's uploaded guidelines
-3. For each carrier/product, tell me:
-   - ✅ LIKELY APPROVED — and at what rate class (Preferred Plus, Preferred, Standard Plus, Standard, Table rating)
-   - ⚠️ POSSIBLE ISSUES — flag any health conditions that may cause a rating or exclusion
-   - ❌ LIKELY DECLINED — and the specific reason based on their guidelines
-4. Rank carriers from most favorable to least favorable for this client
-5. Suggest which product type fits best (term, IUL, whole life, final expense) based on their profile and any coverage limitations
+UMA Decision Process — Underwriting Placement Logic
 
----
+You are not a search engine that dumps retrieved text. You are an underwriter making a placement call. Follow this sequence internally before writing any response:
 
-OUTPUT FORMAT:
-Use this structure every time:
+1. Find the binding constraint. Scan the client profile for the condition(s) with a hard numeric/threshold trigger (A1C cutoffs, build charts, medication tiers, duration-since-diagnosis rules) that varies by carrier and could realistically flip accept→decline. Ignore conditions that are near-universal Accept/Select (mild anxiety, mild osteoarthritis) as decision drivers.
+2. Choose elimination order by case type, not habit. FE-range case → check nonmed/simplified-issue first. Skip nonmed and go straight to FE-chart/fully-underwritten carriers if: face amount exceeds simplified-issue caps, a condition is an outright nonmed decline regardless of severity (e.g. insulin use), or it's a term/IUL case where nonmed isn't relevant.
+3. Decide what to show. Silently omit a carrier if its decline is clean and near-certain from the guideline text. Explicitly name a ruled-out carrier only if: the user asked about it, it's their normal default carrier, or the reason it's excluded is itself useful (e.g. not in the knowledge base).
+4. Check stacking per-carrier, every time. Never assume independence or stacking. Look for explicit language. If a carrier is silent on stacking, flag it as uncertain.
+5. Commit vs. hedge. Commit to one answer when guideline text resolves the case with no interpretation gap. Hedge/ask ONLY when missing data could change the category of outcome (accept vs. decline) — never for data that would only shift the degree (Select vs. Preferred).
+6. Rank by certainty, then price. When multiple carriers are viable, lead with the most certain acceptance, not the cheapest.
+7. Default to short-form. Lead with: carrier + product + expected rate class, 2-4 lines. Then 1-2 sentences per condition, each citing the specific rule that drove it. No Client Snapshot header, no full carrier-by-carrier writeup — unless step 8 applies.
+8. Escalate to long-form only when: there's a real strategic fork (cash-value design tradeoffs, face amount vs. rate class vs. speed tradeoffs), or the user is building something for a client conversation rather than asking "who takes this case."
+9. Missing data: blocker or workaround? Blocker (ask before answering) only if it feeds a pass/fail table directly (build chart, duration cutoff). Otherwise, state the assumption and proceed.
 
-CLIENT SNAPSHOT
-- Name (or initials): 
-- Age / Gender:
-- Height / Weight / Build class:
-- Tobacco: 
-- Key Medical Flags:
-
-CARRIER ANALYSIS
-[Carrier Name] — [Product]
-- Likely Outcome: ✅ / ⚠️ / ❌
-- Estimated Rate Class:
-- Notes / Flags:
-
-RECOMMENDATION
-- Best carrier option(s) for this client
-- Product recommendation
-- Any pre-submission notes (informal inquiry suggested, APS likely, etc.)
+Always required, no matter the format: every rate-class claim must trace to actual guideline text retrieved — quote or cite the specific rule, page, or table. Never state a rate class with confidence unless you can point to where it came from.
 
 ---
 
 IMPORTANT RULES:
-- Always cite the specific guideline or page from the uploaded documents when flagging an issue
-- If a client's condition falls in a gray area, say so clearly and suggest an informal inquiry
+- If a client's condition falls in a gray area per step 5 above, say so clearly and suggest an informal inquiry
 - Never guarantee approval — frame everything as "likely" or "based on guidelines"
 - If I haven't uploaded guidelines for a carrier yet, tell me rather than guessing`;
 
 // Applied only to the USER turn of a follow-up question, never to the
-// protected system prompt above (which must stay byte-for-byte verbatim).
-// The system prompt's own "use this structure every time" line would
-// otherwise fight the requirement that follow-ups be free-form.
-const FOLLOWUP_PREFIX = "(Follow-up question on this same client -- a direct, free-form answer is fine, no need to repeat the full CLIENT SNAPSHOT/CARRIER ANALYSIS/RECOMMENDATION format for this.)";
+// system prompt. Short-form is already the default per the decision
+// process above, but a follow-up narrows scope further -- it's answering
+// one new question, not re-running the full triage/placement call.
+const FOLLOWUP_PREFIX = "(Follow-up question on this same client -- answer it directly and concisely. Don't re-run the full placement analysis or restate carriers already covered unless the question requires it.)";
 
-// Narrow, disclosed auxiliary step: given the client profile and the list of
-// documents actually uploaded per carrier, pick which ones are worth sending
-// in full. Runs once, at the start of a conversation -- the selection then
-// stays fixed for the life of that conversation (mid-conversation carrier
-// expansion is intentionally out of scope). This model NEVER produces the
-// underwriting analysis itself -- that always runs on claude-sonnet-5 below.
-const DOC_SELECT_SYSTEM = `You are selecting which underwriting guideline documents to load for a specific client scenario, given a list of documents actually available per carrier.
-Rules:
-- Always include documents that are general/main underwriting guides, impairment guides, or medical reference guides -- these contain the core condition-to-rate-class decision tables and apply to nearly every case.
-- Only include a narrow, population-specific document (diabetes-specific, foreign national/immigration, professional athletes, military/government-employee-specific, children's/juvenile products) if the client profile clearly matches that population.
-- Never include purely administrative/process documents (e.g. telephone interview guides, APS ordering guides) -- they contain no condition-specific rate class decisions.
-- If you are unsure whether a document applies, include it. Omitting a relevant document produces a wrong underwriting call; including an extra one only costs a bit of context.
-Return JSON only: {"carrier_id": ["slotId1","slotId2"], ...} -- one array per carrier that has at least one available document, using the exact slot IDs given.`;
+// Triage step, run once at the start of a conversation -- the result stays
+// fixed for the life of that conversation (mid-conversation re-triage is
+// intentionally out of scope, matching the existing no-mid-conversation-
+// carrier-expansion design). This is what steps 1-2 of the Decision Process
+// need to happen BEFORE retrieval, not just before writing: which condition
+// is the binding constraint, what elimination order the case type calls
+// for, and -- per carrier -- whether the case can plausibly be resolved
+// from narrative guidance alone (a clean, condition-based decline that
+// doesn't depend on a numeric table lookup) or genuinely needs the full
+// native rate-class tables loaded. This model NEVER produces the
+// underwriting analysis itself -- that always runs on claude-sonnet-5 below,
+// and it still makes its own final call from whatever guideline text it
+// actually receives; this step only controls what gets retrieved.
+const TRIAGE_SYSTEM = `You are triaging a life insurance case before underwriting retrieval, given a client profile and the list of underwriting guideline documents actually available per carrier.
+
+Determine:
+1. bindingConstraint -- the condition(s) with a hard numeric/threshold trigger (A1C cutoffs, build charts, medication tiers, duration-since-diagnosis rules) that could realistically flip accept to decline. Ignore near-universal Accept/Select conditions as decision drivers.
+2. caseType -- one short phrase describing the case for elimination-order purposes (e.g. "FE-range, nonmed-eligible", "FE-range, outright nonmed decline on insulin use", "term case, nonmed not relevant", "large face IUL").
+3. Per carrier that has at least one available document:
+   - docs: which documents to load, following these rules -- always include general/main underwriting guides, impairment guides, or medical reference guides (they contain the core condition-to-rate-class tables); only include a narrow population-specific document (diabetes-specific, foreign national/immigration, professional athletes, military/government-employee, children's/juvenile) if the profile clearly matches that population; never include purely administrative/process documents (telephone interview guides, APS ordering guides). If unsure whether a document applies, include it.
+   - tier -- "full" or "narrative_only". Use "narrative_only" ONLY when you're confident this carrier's outcome for this specific case is a clean, condition-based call that narrative guideline text alone can resolve (e.g. an outright decline on a named condition regardless of severity), so the full numeric rate-class tables aren't needed to reach a defensible answer. Use "full" whenever the outcome plausibly depends on a numeric table (build chart, A1C-to-rate-class grid, age/amount matrix) or you're not confident narrative text alone settles it. Default to "full" when in doubt -- narrative_only skips loading the tables entirely for that carrier, so getting it wrong there costs more than getting it wrong the other way.
+
+Return JSON only:
+{"bindingConstraint": "...", "caseType": "...", "carriers": {"<carrier_id>": {"docs": ["slotId1","slotId2"], "tier": "full"|"narrative_only"}}}`;
 
 function deriveLabel(profileText, replyText) {
   const m = replyText.match(/-\s*Name \(or initials\):\s*(.+)/i);
@@ -105,13 +97,23 @@ function deriveLabel(profileText, replyText) {
 // validating each blob actually looks like a PDF (guards against stale
 // entries from a prior storage format) and gracefully downgrading a carrier
 // to "none" if every one of its selected docs turns out invalid, rather than
-// failing the whole request.
-async function buildCarrierContentBlocks(store, slotIdsByCarrier, carrierStatus) {
+// failing the whole request. A carrier triaged "narrative_only" never has its
+// (often large) native rate tables loaded at all -- this is the retrieval-
+// side half of "don't just loop over every carrier and load everything";
+// the model still gets that carrier's narrative guidance separately.
+async function buildCarrierContentBlocks(store, slotIdsByCarrier, carrierStatus, tierByCarrier = {}) {
   const contentBlocks = [];
   for (const carrier of CARRIERS) {
     const name = CARRIER_NAMES[carrier];
     if (carrierStatus[carrier] === "none") {
       contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()}: NO GUIDELINES UPLOADED FOR THIS CARRIER ===` });
+      continue;
+    }
+    if (tierByCarrier[carrier] === "narrative_only") {
+      contentBlocks.push({
+        type: "text",
+        text: `\n\n=== ${name.toUpperCase()}: FULL RATE TABLES NOT LOADED -- TRIAGED AS RESOLVABLE FROM NARRATIVE GUIDANCE ALONE FOR THIS CASE. If the narrative guidance below doesn't actually settle this carrier's outcome, say so explicitly rather than guessing a rate class. ===`,
+      });
       continue;
     }
     const slotIds = slotIdsByCarrier[carrier] || [];
@@ -274,10 +276,10 @@ export default async function handler(req) {
   let record = await loadConversation(convStore, userId, conversationId);
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);
 
-  let contentBlocks, tableStatus, narrativeStatus, mergedStatus, messages, selectedForRecord, clientDocKeysForRecord, narrativeBlocksTextForRecord;
+  let contentBlocks, tableStatus, narrativeStatus, mergedStatus, messages, selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeBlocksTextForRecord;
 
   if (!isFollowUp) {
-    // ---- Initial analysis: discover, select, and load documents ----
+    // ---- Initial analysis: discover, triage, and load documents ----
     let allKeys = [];
     try {
       const { blobs } = await carrierStore.list();
@@ -299,29 +301,50 @@ export default async function handler(req) {
       });
     }
 
+    // Decision Process steps 1-2 happen here, before retrieval -- not just
+    // before writing. The triage result gates which carriers get their full
+    // native rate tables loaded (buildCarrierContentBlocks below); narrative
+    // guidance is still fetched for every carrier regardless (see
+    // buildNarrativeGuidanceBlocks) since that's the targeted, cheap half of
+    // retrieval, not the part causing bloated context/output.
     let selected = {};
+    let tierByCarrier = {};
+    let triageContext = null;
     if (Object.keys(available).length > 0) {
       try {
-        const selMsg = await anthropic.messages.create({
+        const triageMsg = await anthropic.messages.create({
           model: "claude-haiku-4-5",
-          max_tokens: 1000,
-          system: DOC_SELECT_SYSTEM,
+          max_tokens: 1500,
+          system: TRIAGE_SYSTEM,
           messages: [{
             role: "user",
             content: `CLIENT PROFILE:\n${message}\n\nAVAILABLE DOCUMENTS PER CARRIER:\n${JSON.stringify(available, null, 2)}`,
           }],
         });
-        const selText = selMsg.content?.[0]?.text ?? "";
-        selected = JSON.parse(selText.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+        const triageText = triageMsg.content?.[0]?.text ?? "";
+        const parsed = JSON.parse(triageText.match(/\{[\s\S]*\}/)?.[0] ?? "{}");
+        for (const [carrier, info] of Object.entries(parsed.carriers || {})) {
+          selected[carrier] = info.docs || [];
+          tierByCarrier[carrier] = info.tier === "narrative_only" ? "narrative_only" : "full";
+        }
+        if (parsed.bindingConstraint || parsed.caseType) {
+          triageContext = `\n\n=== CASE TRIAGE ===\nBinding constraint(s): ${parsed.bindingConstraint || "none identified"}\nCase type: ${parsed.caseType || "unspecified"}\n(Your own judgment on the guideline text below governs the final call -- this is a starting point, not a conclusion.)`;
+        }
       } catch {
+        // Triage failed -- fail open exactly like the doc-selection step
+        // always did: load every available doc, full tier, for every
+        // carrier, rather than silently under-retrieving.
         for (const carrier of Object.keys(available)) {
           selected[carrier] = available[carrier].map((d) => d.id);
+          tierByCarrier[carrier] = "full";
         }
       }
     }
     selectedForRecord = selected;
+    tierForRecord = tierByCarrier;
 
-    contentBlocks = await buildCarrierContentBlocks(carrierStore, selected, tableStatus);
+    contentBlocks = await buildCarrierContentBlocks(carrierStore, selected, tableStatus, tierByCarrier);
+    if (triageContext) contentBlocks.unshift({ type: "text", text: triageContext });
     const { contentBlocks: narrativeBlocks, narrativeStatus: nStatus } = await buildNarrativeGuidanceBlocks(message);
     narrativeStatus = nStatus;
     narrativeBlocksTextForRecord = narrativeBlocks.map((b) => b.text);
@@ -340,7 +363,7 @@ export default async function handler(req) {
     // ---- Follow-up: reconstruct the established thread deterministically ----
     tableStatus = { ...record.tableStatus };
     narrativeStatus = { ...record.narrativeStatus };
-    contentBlocks = await buildCarrierContentBlocks(carrierStore, record.carrierSelection || {}, tableStatus);
+    contentBlocks = await buildCarrierContentBlocks(carrierStore, record.carrierSelection || {}, tableStatus, record.tier || {});
     // Narrative guidance is never re-queried on a follow-up -- replay the
     // exact text the initial analysis was actually generated against.
     for (const text of record.narrativeBlocksText || []) {
@@ -419,6 +442,7 @@ export default async function handler(req) {
       if (!isFollowUp) {
         record.profileText = message;
         record.carrierSelection = selectedForRecord;
+        record.tier = tierForRecord;
         record.tableStatus = tableStatus;
         record.narrativeStatus = narrativeStatus;
         record.narrativeBlocksText = narrativeBlocksTextForRecord;
