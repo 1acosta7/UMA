@@ -176,57 +176,137 @@ async function buildClientDocBlocks(store, userId, conversationId) {
   return { contentBlocks, keys };
 }
 
-// Runs once, at the initial analysis call: embeds the client profile and
-// searches each carrier's narrative-guidance chunks in Supabase/pgvector
-// (the hybrid pipeline's non-tabular content -- process guidance, exclusion
-// criteria, eligibility rules -- table-heavy content never enters this
-// store at all, see _ingest.mjs). Results are persisted onto the record as
-// plain text and simply replayed on follow-ups, so a follow-up never
-// re-queries and the context a client's thread was analyzed against never
-// silently drifts if the corpus changes later.
-async function buildNarrativeGuidanceBlocks(queryText) {
+// A chunk's identity for dedup purposes across multiple searches (and across
+// turns, once follow-ups can add to the accumulated set) -- no chunk `id` is
+// returned by match_guideline_chunks, so this is a content-based key.
+function dedupeKey(carrier, m) {
+  return `${carrier}|${m.slot_id || m.slot_label || ""}|${m.page_number}|${(m.content || "").slice(0, 80)}`;
+}
+
+async function carriersWithNarrativeGuidelines(supabase) {
+  const result = [];
+  for (const carrier of CARRIERS) {
+    try {
+      const { data } = await supabase.from("guideline_chunks").select("id").eq("carrier", carrier).limit(1);
+      if ((data?.length || 0) > 0) result.push(carrier);
+    } catch { /* treat as none uploaded */ }
+  }
+  return result;
+}
+
+// Multi-query agentic research, not a single embedding per carrier: a cheap
+// model issues its own sequence of searches against guideline_chunks,
+// starting broad and narrowing as it learns what's actually uploaded and
+// relevant -- the same shape as how a Claude Project searches its attached
+// knowledge, rather than one fixed query decided in advance. Runs on
+// claude-haiku-4-5 as a separate research pass (not the final claude-sonnet-5
+// call) so the expensive call that also reads native PDF tables stays a
+// single non-looping streaming request; the loop here just produces a richer
+// set of retrieved chunks for that call to read.
+const RESEARCH_SYSTEM = `You are researching a life insurance underwriting case in a vector database of carrier guideline narrative text, before final analysis is drafted. Use the search_guidelines tool to issue 4-8 distinct searches -- start broad (the client's condition(s) + age + general underwriting philosophy, searched across all carriers), then narrow to specific carriers and specific conditions as you learn what's actually uploaded and relevant. Never repeat the same query. Stop once you've covered every condition in the case against every carrier that has guidelines uploaded, or after 8 searches, whichever comes first. If the case is trivially clean, you may stop after 1-2 searches -- do not pad the search count for its own sake.`;
+
+async function researchNarrativeGuidance(anthropic, openai, supabase, queryText, carriersWithGuidelines) {
+  if (carriersWithGuidelines.length === 0) return [];
+
+  const tool = {
+    name: "search_guidelines",
+    description: "Search the vector database of carrier underwriting guideline narrative text (process guidance, exclusion criteria, eligibility rules, informal-inquiry rules -- NOT rate-class tables, which come from native PDF documents provided separately). Returns the most relevant chunks with carrier, document, and page citations.",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural-language search text -- a condition, a carrier-specific rule, or a combination." },
+        carrier: { type: "string", enum: carriersWithGuidelines, description: "Restrict this search to one carrier. Omit to search across every carrier with guidelines uploaded." },
+      },
+      required: ["query"],
+    },
+  };
+
+  const seen = new Set();
+  const collected = [];
+  const messages = [{
+    role: "user",
+    content: `CLIENT CASE:\n${queryText}\n\nCarriers with guidelines uploaded: ${carriersWithGuidelines.map((c) => CARRIER_NAMES[c]).join(", ")}`,
+  }];
+
+  const MAX_SEARCHES = 8;
+  let searchCount = 0;
+
+  for (let round = 0; round < MAX_SEARCHES + 1; round++) {
+    let resp;
+    try {
+      resp = await anthropic.messages.create({
+        model: "claude-haiku-4-5",
+        max_tokens: 1024,
+        system: RESEARCH_SYSTEM,
+        tools: [tool],
+        messages,
+      });
+    } catch {
+      break; // research failure -- proceed with whatever was collected so far
+    }
+
+    const toolUses = resp.content.filter((b) => b.type === "tool_use");
+    if (toolUses.length === 0) break;
+
+    messages.push({ role: "assistant", content: resp.content });
+    const toolResults = [];
+    for (const tu of toolUses) {
+      if (searchCount >= MAX_SEARCHES) {
+        toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: "Search budget exhausted -- stop searching and proceed with what you have." });
+        continue;
+      }
+      searchCount++;
+      const carrier = tu.input?.carrier && carriersWithGuidelines.includes(tu.input.carrier) ? tu.input.carrier : null;
+      const query = String(tu.input?.query || "").slice(0, 500);
+      let resultText = "No results.";
+      try {
+        const embRes = await openai.embeddings.create({ model: EMBEDDING_MODEL, input: [query] });
+        const embedding = embRes.data[0].embedding;
+        const targets = carrier ? [carrier] : carriersWithGuidelines;
+        const hits = [];
+        for (const c of targets) {
+          const { data } = await supabase.rpc("match_guideline_chunks", { query_embedding: embedding, match_carrier: c, match_count: 4 });
+          for (const m of data || []) hits.push({ ...m, carrier: c });
+        }
+        for (const m of hits) {
+          const key = dedupeKey(m.carrier, m);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          collected.push(m);
+        }
+        resultText = hits.length
+          ? hits.map((m) => `[${CARRIER_NAMES[m.carrier]} — ${m.slot_label || m.slot_id}, page ${m.page_number}]: ${m.content}`).join("\n\n")
+          : "No matching guidance found for this query.";
+      } catch {
+        resultText = "Search failed.";
+      }
+      toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: resultText });
+    }
+    messages.push({ role: "user", content: toolResults });
+    if (searchCount >= MAX_SEARCHES) break;
+  }
+
+  return collected;
+}
+
+// Turns a flat, deduped chunk list into the same "=== CARRIER NARRATIVE
+// GUIDANCE ===" text blocks the final model reads, plus per-carrier status.
+// Takes the FULL accumulated chunk list (not just this turn's new finds) so
+// a follow-up's additional research adds to what's known rather than
+// replacing it -- see the follow-up branch below.
+function formatNarrativeBlocks(allChunks, carriersWithGuidelines) {
   const contentBlocks = [];
   const narrativeStatus = {};
-
-  let supabase, openai;
-  try {
-    supabase = createClient(Netlify.env.get("SUPABASE_URL"), Netlify.env.get("SUPABASE_SERVICE_KEY"));
-    openai = new OpenAI({ apiKey: Netlify.env.get("OPENAI_API_KEY") });
-  } catch {
-    for (const carrier of CARRIERS) narrativeStatus[carrier] = "none";
-    return { contentBlocks, narrativeStatus };
-  }
-
-  let queryEmbedding;
-  try {
-    const res = await openai.embeddings.create({ model: EMBEDDING_MODEL, input: [queryText] });
-    queryEmbedding = res.data[0].embedding;
-  } catch {
-    for (const carrier of CARRIERS) narrativeStatus[carrier] = "none";
-    return { contentBlocks, narrativeStatus };
-  }
+  const byCarrier = {};
+  for (const m of allChunks) (byCarrier[m.carrier] ||= []).push(m);
 
   for (const carrier of CARRIERS) {
     const name = CARRIER_NAMES[carrier];
-    let hasAny = false;
-    try {
-      const { data } = await supabase.from("guideline_chunks").select("id").eq("carrier", carrier).limit(1);
-      hasAny = (data?.length || 0) > 0;
-    } catch { /* treat as none uploaded */ }
-
-    if (!hasAny) {
+    if (!carriersWithGuidelines.includes(carrier)) {
       narrativeStatus[carrier] = "none";
       continue;
     }
-
-    let matches = [];
-    try {
-      const { data } = await supabase.rpc("match_guideline_chunks", {
-        query_embedding: queryEmbedding, match_carrier: carrier, match_count: 6,
-      });
-      matches = data || [];
-    } catch { matches = []; }
-
+    const matches = byCarrier[carrier] || [];
     if (matches.length === 0) {
       // Hard fallback rule: guidelines ARE uploaded for this carrier, but
       // nothing matched this client's specific conditions -- say so
@@ -246,7 +326,7 @@ async function buildNarrativeGuidanceBlocks(queryText) {
         return `[${name} — ${doc}, page ${m.page_number}]: ${m.content}`;
       })
       .join("\n\n");
-    contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()} NARRATIVE GUIDANCE (via search) ===\n${cited}` });
+    contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()} NARRATIVE GUIDANCE (via multi-query search) ===\n${cited}` });
   }
 
   return { contentBlocks, narrativeStatus };
@@ -273,10 +353,16 @@ export default async function handler(req) {
   const clientStore = getStore({ name: "client-docs", consistency: "strong" });
   const convStore = getStore({ name: "conversations", consistency: "strong" });
 
+  let supabase = null, openai = null;
+  try {
+    supabase = createClient(Netlify.env.get("SUPABASE_URL"), Netlify.env.get("SUPABASE_SERVICE_KEY"));
+    openai = new OpenAI({ apiKey: Netlify.env.get("OPENAI_API_KEY") });
+  } catch { /* narrative research degrades to "none" below if these are unavailable */ }
+
   let record = await loadConversation(convStore, userId, conversationId);
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);
 
-  let contentBlocks, tableStatus, narrativeStatus, mergedStatus, messages, selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeBlocksTextForRecord;
+  let contentBlocks, tableStatus, narrativeStatus, mergedStatus, messages, selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord;
 
   if (!isFollowUp) {
     // ---- Initial analysis: discover, triage, and load documents ----
@@ -304,8 +390,8 @@ export default async function handler(req) {
     // Decision Process steps 1-2 happen here, before retrieval -- not just
     // before writing. The triage result gates which carriers get their full
     // native rate tables loaded (buildCarrierContentBlocks below); narrative
-    // guidance is still fetched for every carrier regardless (see
-    // buildNarrativeGuidanceBlocks) since that's the targeted, cheap half of
+    // guidance is still researched for every carrier regardless (see
+    // researchNarrativeGuidance) since that's the targeted, cheap half of
     // retrieval, not the part causing bloated context/output.
     let selected = {};
     let tierByCarrier = {};
@@ -348,10 +434,22 @@ export default async function handler(req) {
     tierForRecord = tierByCarrier;
 
     contentBlocks = await buildCarrierContentBlocks(carrierStore, selected, tableStatus, tierByCarrier);
-    const { contentBlocks: narrativeBlocks, narrativeStatus: nStatus } = await buildNarrativeGuidanceBlocks(message);
-    narrativeStatus = nStatus;
-    narrativeBlocksTextForRecord = narrativeBlocks.map((b) => b.text);
-    contentBlocks.push(...narrativeBlocks);
+
+    // Multi-query research (steps 1-8 of RESEARCH_SYSTEM), not one embedding
+    // per carrier -- see researchNarrativeGuidance above.
+    narrativeStatus = {};
+    for (const carrier of CARRIERS) narrativeStatus[carrier] = "none";
+    let allChunks = [];
+    if (supabase && openai) {
+      try {
+        const guidedCarriers = await carriersWithNarrativeGuidelines(supabase);
+        allChunks = await researchNarrativeGuidance(anthropic, openai, supabase, message, guidedCarriers);
+        const { contentBlocks: narrativeBlocks, narrativeStatus: nStatus } = formatNarrativeBlocks(allChunks, guidedCarriers);
+        narrativeStatus = nStatus;
+        contentBlocks.push(...narrativeBlocks);
+      } catch { /* research failed -- narrativeStatus/allChunks stay at "none"/empty defaults above */ }
+    }
+    narrativeChunksForRecord = allChunks;
 
     const { contentBlocks: clientBlocks, keys: clientKeys } = await buildClientDocBlocks(clientStore, userId, conversationId);
     contentBlocks.push(...clientBlocks);
@@ -363,15 +461,45 @@ export default async function handler(req) {
 
     record = record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [] };
   } else {
-    // ---- Follow-up: reconstruct the established thread deterministically ----
+    // ---- Follow-up: reconstruct the established thread, but re-research ----
     tableStatus = { ...record.tableStatus };
-    narrativeStatus = { ...record.narrativeStatus };
     contentBlocks = await buildCarrierContentBlocks(carrierStore, record.carrierSelection || {}, tableStatus, record.tier || {});
-    // Narrative guidance is never re-queried on a follow-up -- replay the
-    // exact text the initial analysis was actually generated against.
-    for (const text of record.narrativeBlocksText || []) {
-      contentBlocks.push({ type: "text", text });
+
+    // A second retrieval round: new details in a follow-up (confirming
+    // insulin use, providing build, etc.) can change what's worth finding,
+    // so re-run research scoped to the new message rather than only ever
+    // replaying the first pass. This is additive, not a replacement -- prior
+    // chunks stay in context and newly-found ones are merged in, deduped,
+    // so the accumulated knowledge for this case only grows across turns.
+    const priorChunks = record.narrativeChunks || [];
+    const priorKeys = new Set(priorChunks.map((m) => dedupeKey(m.carrier, m)));
+    let allChunks = priorChunks;
+    if (supabase && openai) {
+      try {
+        const guidedCarriers = await carriersWithNarrativeGuidelines(supabase);
+        const researchQuery = `${record.profileText}\n\nNEW INFORMATION FROM A FOLLOW-UP MESSAGE: ${message}`;
+        const found = await researchNarrativeGuidance(anthropic, openai, supabase, researchQuery, guidedCarriers);
+        const newChunks = found.filter((m) => !priorKeys.has(dedupeKey(m.carrier, m)));
+        allChunks = [...priorChunks, ...newChunks];
+        const { contentBlocks: narrativeBlocks, narrativeStatus: nStatus } = formatNarrativeBlocks(allChunks, guidedCarriers);
+        narrativeStatus = nStatus;
+        contentBlocks.push(...narrativeBlocks);
+      } catch {
+        // Research failed on this turn -- fall back to whatever was already
+        // established (old-format conversations from before this change
+        // persisted pre-formatted text instead of raw chunks; new-format
+        // ones fall back to re-formatting the unchanged prior chunk list).
+        narrativeStatus = { ...record.narrativeStatus };
+        if (priorChunks.length) {
+          contentBlocks.push(...formatNarrativeBlocks(priorChunks, Object.keys(record.narrativeStatus || {}).filter((c) => record.narrativeStatus[c] !== "none")).contentBlocks);
+        } else {
+          for (const text of record.narrativeBlocksText || []) contentBlocks.push({ type: "text", text });
+        }
+      }
+    } else {
+      narrativeStatus = { ...record.narrativeStatus };
     }
+    narrativeChunksForRecord = allChunks;
 
     const { contentBlocks: clientBlocks } = await buildClientDocBlocks(clientStore, userId, conversationId);
     contentBlocks.push(...clientBlocks);
@@ -442,14 +570,18 @@ export default async function handler(req) {
 
       const now = new Date().toISOString();
       record.updatedAt = now;
+      // narrativeChunks/narrativeStatus/carrierStatus are saved on every
+      // turn, not just the initial one -- a follow-up's second retrieval
+      // round can change all three, and each turn's re-research should
+      // build on what the previous turn already found.
+      record.narrativeChunks = narrativeChunksForRecord;
+      record.narrativeStatus = narrativeStatus;
+      record.carrierStatus = mergedStatus;
       if (!isFollowUp) {
         record.profileText = message;
         record.carrierSelection = selectedForRecord;
         record.tier = tierForRecord;
         record.tableStatus = tableStatus;
-        record.narrativeStatus = narrativeStatus;
-        record.narrativeBlocksText = narrativeBlocksTextForRecord;
-        record.carrierStatus = mergedStatus;
         record.clientDocKeys = clientDocKeysForRecord;
         record.turns.push({ role: "assistant", text: replyText });
         if (!record.label) record.label = deriveLabel(record.profileText, replyText);
