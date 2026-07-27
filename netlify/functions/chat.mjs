@@ -10,48 +10,60 @@ import {
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
 
-const SYSTEM_PROMPT = `You are my personal life insurance underwriting assistant. I am a licensed life insurance professional. Your job is to help me determine which carriers will approve my clients and at what rate class, based on their health profile.
+const SYSTEM_PROMPT = `You are an expert life insurance field underwriting assistant. I am a licensed life insurance professional. Your responsibility is to recommend the SINGLE BEST insurance product for my client, based only on the underwriting documents in your knowledge base. Your primary objective is accuracy.
 
 ---
 
 WHAT I WILL GIVE YOU:
-For each client, I will provide:
-- Age, gender, height, weight
-- Tobacco/nicotine use (type, frequency, last use)
-- Medical history (diagnoses, dates, medications, surgeries)
-- Family history (parents/siblings, cause of death, age at death)
-- Financial information if relevant (income, net worth for large face amounts)
-- Desired coverage amount and product type
+For each client: age, gender, state, height, weight, tobacco/nicotine use, medical conditions, medications, lab values, family history, desired coverage amount, and product objective.
+
+If critical information is missing -- specifically anything that would change WHICH carrier or product wins, not just the exact rate class within an already-clear winner -- ask only those questions before continuing.
 
 ---
 
 YOUR KNOWLEDGE BASE:
-I have uploaded underwriting guidelines for the following carriers and products into this project. Use ONLY this uploaded material to make decisions. Do not guess or use general knowledge for carrier-specific rules.
+I have uploaded underwriting guidelines for the following carriers and products into this project. Use ONLY this uploaded material. Never use outside knowledge, never invent a rule, requirement, or recommendation that isn't in retrieved text.
 
 ---
 
-UMA Decision Process — Underwriting Placement Logic
-
-You are not a search engine that dumps retrieved text. You are an underwriter making a placement call. Follow this sequence internally before writing any response:
-
-1. Find the binding constraint. Scan the client profile for the condition(s) with a hard numeric/threshold trigger (A1C cutoffs, build charts, medication tiers, duration-since-diagnosis rules) that varies by carrier and could realistically flip accept→decline. Ignore conditions that are near-universal Accept/Select (mild anxiety, mild osteoarthritis) as decision drivers.
-2. Choose elimination order by case type, not habit. FE-range case → check nonmed/simplified-issue first. Skip nonmed and go straight to FE-chart/fully-underwritten carriers if: face amount exceeds simplified-issue caps, a condition is an outright nonmed decline regardless of severity (e.g. insulin use), or it's a term/IUL case where nonmed isn't relevant.
-3. Decide what to show. Silently omit a carrier if its decline is clean and near-certain from the guideline text. Explicitly name a ruled-out carrier only if: the user asked about it, it's their normal default carrier, or the reason it's excluded is itself useful (e.g. not in the knowledge base).
-4. Check stacking per-carrier, every time. Never assume independence or stacking. Look for explicit language. If a carrier is silent on stacking, flag it as uncertain.
-5. Commit vs. hedge. Commit to one answer when guideline text resolves the case with no interpretation gap. Hedge/ask ONLY when missing data could change the category of outcome (accept vs. decline) — never for data that would only shift the degree (Select vs. Preferred).
-6. Rank by certainty, then price. When multiple carriers are viable, lead with the most certain acceptance, not the cheapest.
-7. Default to short-form. Lead with: carrier + product + expected rate class, 2-4 lines. Then 1-2 sentences per condition, each citing the specific rule that drove it. No Client Snapshot header, no full carrier-by-carrier writeup — unless step 8 applies.
-8. Escalate to long-form only when: there's a real strategic fork (cash-value design tradeoffs, face amount vs. rate class vs. speed tradeoffs), or the user is building something for a client conversation rather than asking "who takes this case."
-9. Missing data: blocker or workaround? Blocker (ask before answering) only if it feeds a pass/fail table directly (build chart, duration cutoff). Otherwise, state the assumption and proceed.
-
-Always required, no matter the format: every rate-class claim must trace to actual guideline text retrieved — quote or cite the specific rule, page, or table. Never state a rate class with confidence unless you can point to where it came from.
+CRITICAL RULE -- CARRIERS ARE INDEPENDENT
+Never combine underwriting rules from different carriers. Treat every carrier as if it has its own independent underwriting department. Do not let one carrier's medical guidelines, build charts, prescription guides, or eligibility requirements influence another carrier's recommendation.
 
 ---
 
-IMPORTANT RULES:
-- If a client's condition falls in a gray area per step 5 above, say so clearly and suggest an informal inquiry
-- Never guarantee approval — frame everything as "likely" or "based on guidelines"
-- If I haven't uploaded guidelines for a carrier yet, tell me rather than guessing`;
+EVALUATION PROCESS -- follow every time, internally, before writing anything:
+
+1. Find the binding constraint(s). Identify the condition(s), medication(s), or lab value(s) with a hard numeric/threshold trigger that varies by carrier and could realistically flip accept vs. decline. Ignore near-universal Accept/Select conditions as decision drivers.
+2. Evaluate each carrier independently. For each carrier with guidelines uploaded: consider ONLY that carrier's retrieved guidance -- never cross-reference another carrier's chart while doing this -- check each condition, medication, and lab value against that carrier's own rules separately, determine the single best product that carrier offers this case, and assign a confidence level (High/Medium/Low) based only on what was actually retrieved for that carrier.
+3. Check stacking per-carrier, every time. Never assume independence or stacking across conditions. Look for explicit language on comorbidity/stacking; if a carrier is silent on it, that uncertainty factors into its confidence level.
+4. Compare only the recommended products. Once every carrier has a product + confidence, compare across carriers and select the single strongest overall fit, prioritizing in this order: highest likelihood of approval, best product fit, simplest underwriting path, least underwriting friction, strongest documentary evidence.
+5. Commit vs. ask. Commit to a recommendation when guideline text resolves the case with no interpretation gap. Ask ONLY when missing data could change which carrier/product wins -- never for data that would only shift the degree within an already-clear winner.
+
+---
+
+FINAL RESPONSE FORMAT -- use this every time, by default:
+
+Recommended Product
+[Carrier Name] — [Product Name]
+
+Why
+[2-4 sentences on why this is the single strongest overall fit]
+
+Source
+[The specific document, rule, or page it traces to -- short, not a full citation dump]
+
+Confidence
+[High / Medium / Low]
+
+Two optional trailing lines, only when they actually apply:
+- If two carriers are genuinely close and there isn't a clear single winner: "Two strong options — ask if you want a comparison." Don't silently pick one and hide that it was close.
+- If the winning recommendation itself is a gray-area/borderline call: "Borderline case — consider an informal inquiry before submitting."
+
+Do not otherwise mention, in this default format: products or carriers that weren't selected, declined products/carriers, your internal reasoning, comparison tables, or full underwriting tables. The Source line is the one exception to "no citations visible" -- keep it short. If I ask for more detail or a comparison, give it then -- not by default.
+
+If the retrieved documents don't provide enough evidence to make a recommendation, say exactly: "Additional underwriting information is required before a recommendation can be made." Do not guess. If I haven't uploaded guidelines for a carrier at all, that's the kind of gap worth naming rather than silently working around.
+
+Act like an experienced senior field underwriter deciding which application to open first today. That is your final answer.`;
 
 // Applied only to the USER turn of a follow-up question, never to the
 // system prompt. Short-form is already the default per the decision
@@ -195,29 +207,38 @@ async function carriersWithNarrativeGuidelines(supabase) {
 }
 
 // Multi-query agentic research, not a single embedding per carrier: a cheap
-// model issues its own sequence of searches against guideline_chunks,
-// starting broad and narrowing as it learns what's actually uploaded and
-// relevant -- the same shape as how a Claude Project searches its attached
-// knowledge, rather than one fixed query decided in advance. Runs on
-// claude-haiku-4-5 as a separate research pass (not the final claude-sonnet-5
-// call) so the expensive call that also reads native PDF tables stays a
-// single non-looping streaming request; the loop here just produces a richer
-// set of retrieved chunks for that call to read.
-const RESEARCH_SYSTEM = `You are researching a life insurance underwriting case in a vector database of carrier guideline narrative text, before final analysis is drafted. Use the search_guidelines tool to issue 4-8 distinct searches -- start broad (the client's condition(s) + age + general underwriting philosophy, searched across all carriers), then narrow to specific carriers and specific conditions as you learn what's actually uploaded and relevant. Never repeat the same query. Stop once you've covered every condition in the case against every carrier that has guidelines uploaded, or after 8 searches, whichever comes first. If the case is trivially clean, you may stop after 1-2 searches -- do not pad the search count for its own sake.`;
+// model issues its own sequence of searches against guideline_chunks. Every
+// search is scoped to exactly one carrier -- "carrier" is a required tool
+// argument, not optional -- because letting a search span multiple carriers
+// is exactly the kind of blending the CRITICAL RULE in SYSTEM_PROMPT
+// forbids: results from carrier A and carrier B would land in the same
+// tool_result and start blending in the research model's own reasoning
+// before the final model even sees them. Runs on claude-haiku-4-5 as a
+// separate research pass (not the final claude-sonnet-5 call) so the
+// expensive call that also reads native PDF tables stays a single
+// non-looping streaming request; the loop here just produces a richer set
+// of retrieved chunks, cleanly attributed per carrier, for that call to read.
+const RESEARCH_SYSTEM = `You are researching a life insurance underwriting case in a vector database of carrier guideline narrative text, before final analysis is drafted. Carriers are fully independent -- never let what you find for one carrier shape how you search another.
+
+For EACH carrier with guidelines uploaded, run a SEPARATE search_guidelines call, scoped to that one carrier, for EACH distinct medical condition, medication, and numeric lab value mentioned in the case. Never combine multiple conditions into one query, and never rely on a single broad search to cover a carrier -- if the case has 3 conditions and 4 carriers have guidelines uploaded, that is a minimum of 12 searches, not 3 or 4.
+
+Search order: for each carrier, start with one search for its general/main underwriting guide or condition-to-rating table (broadest), then one targeted search per condition/medication/lab value against that same carrier. Finish covering one carrier before moving to the next. Never repeat the same query on the same carrier.
+
+Stop once every carrier with guidelines uploaded has been searched for every condition/medication/lab value in the case, or after 16 searches, whichever comes first. Do not pad the search count once coverage is complete.`;
 
 async function researchNarrativeGuidance(anthropic, openai, supabase, queryText, carriersWithGuidelines) {
   if (carriersWithGuidelines.length === 0) return [];
 
   const tool = {
     name: "search_guidelines",
-    description: "Search the vector database of carrier underwriting guideline narrative text (process guidance, exclusion criteria, eligibility rules, informal-inquiry rules -- NOT rate-class tables, which come from native PDF documents provided separately). Returns the most relevant chunks with carrier, document, and page citations.",
+    description: "Search ONE carrier's underwriting guideline narrative text (process guidance, exclusion criteria, eligibility rules, informal-inquiry rules -- NOT rate-class tables, which come from native PDF documents provided separately). Every call is scoped to a single carrier -- there is no cross-carrier search. Returns the most relevant chunks with document and page citations.",
     input_schema: {
       type: "object",
       properties: {
-        query: { type: "string", description: "Natural-language search text -- a condition, a carrier-specific rule, or a combination." },
-        carrier: { type: "string", enum: carriersWithGuidelines, description: "Restrict this search to one carrier. Omit to search across every carrier with guidelines uploaded." },
+        query: { type: "string", description: "Natural-language search text for ONE condition, medication, lab value, or carrier-specific rule -- not a combination of several." },
+        carrier: { type: "string", enum: carriersWithGuidelines, description: "The single carrier this search is scoped to. Required -- searches never span multiple carriers." },
       },
-      required: ["query"],
+      required: ["query", "carrier"],
     },
   };
 
@@ -228,7 +249,7 @@ async function researchNarrativeGuidance(anthropic, openai, supabase, queryText,
     content: `CLIENT CASE:\n${queryText}\n\nCarriers with guidelines uploaded: ${carriersWithGuidelines.map((c) => CARRIER_NAMES[c]).join(", ")}`,
   }];
 
-  const MAX_SEARCHES = 8;
+  const MAX_SEARCHES = 16;
   let searchCount = 0;
 
   for (let round = 0; round < MAX_SEARCHES + 1; round++) {
@@ -256,18 +277,19 @@ async function researchNarrativeGuidance(anthropic, openai, supabase, queryText,
         continue;
       }
       searchCount++;
-      const carrier = tu.input?.carrier && carriersWithGuidelines.includes(tu.input.carrier) ? tu.input.carrier : null;
+      const carrier = carriersWithGuidelines.includes(tu.input?.carrier) ? tu.input.carrier : null;
       const query = String(tu.input?.query || "").slice(0, 500);
       let resultText = "No results.";
+      if (!carrier) {
+        resultText = "Missing or invalid carrier -- every search must specify exactly one carrier from the list provided.";
+        toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: resultText });
+        continue;
+      }
       try {
         const embRes = await openai.embeddings.create({ model: EMBEDDING_MODEL, input: [query] });
         const embedding = embRes.data[0].embedding;
-        const targets = carrier ? [carrier] : carriersWithGuidelines;
-        const hits = [];
-        for (const c of targets) {
-          const { data } = await supabase.rpc("match_guideline_chunks", { query_embedding: embedding, match_carrier: c, match_count: 4 });
-          for (const m of data || []) hits.push({ ...m, carrier: c });
-        }
+        const { data } = await supabase.rpc("match_guideline_chunks", { query_embedding: embedding, match_carrier: carrier, match_count: 4 });
+        const hits = (data || []).map((m) => ({ ...m, carrier }));
         for (const m of hits) {
           const key = dedupeKey(m.carrier, m);
           if (seen.has(key)) continue;
