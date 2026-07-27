@@ -561,6 +561,9 @@ export default async function handler(req) {
   if (debug) {
     return new Response(JSON.stringify({
       isFollowUp, tableStatus, narrativeStatus, mergedStatus,
+      carrierSelection: isFollowUp ? (record.carrierSelection || {}) : selectedForRecord,
+      tier: isFollowUp ? (record.tier || {}) : tierForRecord,
+      narrativeChunks: (narrativeChunksForRecord || []).map((m) => ({ carrier: m.carrier, slot: m.slot_label || m.slot_id, page: m.page_number, preview: (m.content || "").slice(0, 120) })),
       firstMessageBlockCount: messages[0].content.length, turnsSoFar: record.turns.length,
       accessLog: await readAccessLog(userId, conversationId),
     }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
