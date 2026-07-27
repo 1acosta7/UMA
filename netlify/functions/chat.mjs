@@ -31,6 +31,13 @@ Never combine underwriting rules from different carriers. Treat every carrier as
 
 ---
 
+FEX / FINAL EXPENSE TERMINOLOGY
+In final expense (FEX) documents, "Select" and "Graded" are BENEFIT LEVELS -- not rate tiers, not declines. "Select" means full immediate benefit; this IS a viable placement. "Graded" means benefits paid on a graded schedule; this IS also a viable placement. Only "Decline" or explicit exclusion language means no placement.
+- The PRODUCT NAME is the FEX product (e.g., "FE Express Solution"). The RATE CLASS is what the condition chart shows ("Select Nontobacco" or "Graded"). Never swap these -- do not call the product "Graded FE Express" when the chart says Select.
+- Use the client's actual tobacco status to select the correct row in any tobacco/non-tobacco table. Never output a rate class from the wrong tobacco row.
+
+---
+
 EVALUATION PROCESS -- follow every time, internally, before writing anything:
 
 1. Find the binding constraint(s). Identify the condition(s), medication(s), or lab value(s) with a hard numeric/threshold trigger that varies by carrier and could realistically flip accept vs. decline. Ignore near-universal Accept/Select conditions as decision drivers.
@@ -90,7 +97,7 @@ Determine:
 1. bindingConstraint -- the condition(s) with a hard numeric/threshold trigger (A1C cutoffs, build charts, medication tiers, duration-since-diagnosis rules) that could realistically flip accept to decline. Ignore near-universal Accept/Select conditions as decision drivers.
 2. caseType -- one short phrase describing the case for elimination-order purposes (e.g. "FE-range, nonmed-eligible", "FE-range, outright nonmed decline on insulin use", "term case, nonmed not relevant", "large face IUL").
 3. Per carrier that has at least one available document:
-   - docs: which documents to load, following these rules -- always include general/main underwriting guides, impairment guides, or medical reference guides (they contain the core condition-to-rate-class tables); only include a narrow population-specific document (diabetes-specific, foreign national/immigration, professional athletes, military/government-employee, children's/juvenile) if the profile clearly matches that population; never include purely administrative/process documents (telephone interview guides, APS ordering guides). If unsure whether a document applies, include it.
+   - docs: which documents to load, following these rules -- always include general/main underwriting guides, impairment guides, or medical reference guides (they contain the core condition-to-rate-class tables); only include a narrow population-specific document (diabetes-specific, foreign national/immigration, professional athletes, military/government-employee, children's/juvenile) if the profile clearly matches that population; never include purely administrative/process documents (telephone interview guides, APS ordering guides). If unsure whether a document applies, include it. When a carrier has product-specific guides (final expense/FEX, term, whole life, IUL) instead of a single main guide: for clients aged 60+ OR with significant health impairments (diabetes on insulin, heart conditions, cancer history, COPD, BMI>40, etc.), ALWAYS include the final expense/FEX guide -- these have the most lenient underwriting and are often the only viable placement for impaired risk. When uncertain which product line applies, include all of them.
    - tier -- "full" or "narrative_only". HARD RULE: if bindingConstraint involves ANY quantifiable clinical value (A1C, blood pressure, PSA, build/BMI, lab result, dosage, duration in years/months) as opposed to a purely binary/named-condition trigger, tier MUST be "full" for every carrier that has a general/impairment/medical-reference document available -- a numeric value can always land inside a table's boundary in a way narrative text won't state, so narrative_only is never safe for it, regardless of how the narrative text reads. Only use "narrative_only" when bindingConstraint itself is a flat, named-condition trigger with no numeric axis (e.g. "insulin use", "currently smokes") AND you are confident the narrative text states the outcome outright. Default to "full" whenever unsure -- narrative_only skips loading the tables entirely for that carrier, so getting it wrong there costs more than getting it wrong the other way.
 
 Return JSON only:
@@ -223,6 +230,8 @@ const RESEARCH_SYSTEM = `You are researching a life insurance underwriting case 
 For EACH carrier with guidelines uploaded, run a SEPARATE search_guidelines call, scoped to that one carrier, for EACH distinct medical condition, medication, and numeric lab value mentioned in the case. Never combine multiple conditions into one query, and never rely on a single broad search to cover a carrier -- if the case has 3 conditions and 4 carriers have guidelines uploaded, that is a minimum of 12 searches, not 3 or 4.
 
 Search order: for each carrier, start with one search for its general/main underwriting guide or condition-to-rating table (broadest), then one targeted search per condition/medication/lab value against that same carrier. Finish covering one carrier before moving to the next. Never repeat the same query on the same carrier.
+
+If the client is age 60+ or has multiple significant impairments, also run one search per carrier for "final expense underwriting criteria" and, for each significant impairment, a carrier-specific search for "[condition] select" (e.g. "diabetes insulin select"). FEX/final-expense products use condition-to-outcome decision charts where "Select" is a standard viable benefit level, not a decline -- finding "Select" next to a condition confirms placement is available at that level, and FEX guides are often the only viable placement for impaired-risk clients that standard products would decline.
 
 Stop once every carrier with guidelines uploaded has been searched for every condition/medication/lab value in the case, or after 16 searches, whichever comes first. Do not pad the search count once coverage is complete.`;
 

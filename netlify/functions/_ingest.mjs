@@ -12,7 +12,7 @@ const EMBEDDING_MODEL = "text-embedding-3-small";
 // narrative (process guidance, exclusion criteria, eligibility language).
 // One batched call regardless of page count, not one call per page.
 const CLASSIFY_SYSTEM = `You are classifying pages of an insurance underwriting guideline PDF. For each page, decide:
-- "table": the page is dominated by a rate-class table, numeric underwriting grid, build/BMI chart, or age/amount matrix -- short condition names or numeric labels paired with columns of Yes/checkmarks/rate-class codes, even if PDF text extraction has flattened the columns into a stream of short tokens.
+- "table": the page is dominated by a rate-class table, numeric underwriting grid, build/BMI chart, age/amount matrix, or condition-to-outcome decision chart -- short condition names or numeric labels paired with columns of Yes/checkmarks/rate-class codes or outcome labels (Select/Graded/Decline/No Coverage), even if PDF text extraction has flattened the columns into a stream of short tokens. A page listing condition names each paired with a benefit level or rate class label (Select, Graded, Decline) is "table" even when it contains no numeric values.
 - "narrative": the page is dominated by prose -- underwriting philosophy, process instructions, exclusion criteria, informal inquiry guidance, eligibility rules, or similar connected sentences.
 A page with a short intro sentence above a table is still "table" if the bulk of its content is tabular data.
 Return JSON only: {"pages": [{"page": 1, "type": "table"}, {"page": 2, "type": "narrative"}, ...]} -- one entry for every page number given, in order.`;
