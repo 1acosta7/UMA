@@ -593,6 +593,21 @@ export default async function handler(req) {
             controller.enqueue(sse("delta", { text: event.delta.text }));
           }
         }
+        // The stream can complete "successfully" (no thrown error) yet still
+        // carry zero text -- e.g. stop_reason "refusal"/"max_tokens" with no
+        // text block ever opened. Silently closing here used to surface as
+        // an opaque "No analysis was returned" on the frontend with nothing
+        // to debug from. Surface the actual stop_reason instead.
+        if (!replyText) {
+          let stopReason = "unknown";
+          try {
+            const final = await anthropicStream.finalMessage();
+            stopReason = final?.stop_reason || stopReason;
+          } catch { /* finalMessage best-effort only */ }
+          controller.enqueue(sse("error", { error: `Model returned no text (stop_reason: ${stopReason}). Try again or narrow the client profile.` }));
+          controller.close();
+          return;
+        }
       } catch (err) {
         controller.enqueue(sse("error", { error: err.message }));
         controller.close();
