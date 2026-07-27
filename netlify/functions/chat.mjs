@@ -377,33 +377,14 @@ function formatNarrativeBlocks(allChunks, carriersWithGuidelines) {
   return { contentBlocks, narrativeStatus };
 }
 
-export default async function handler(req) {
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-
-  let userId;
-  try {
-    userId = await requireUser(req.headers.get("authorization"));
-  } catch {
-    return jsonError(401, "Unauthorized");
-  }
-
-  if (req.method !== "POST") return jsonError(405, "Method not allowed");
-
-  const { conversationId, message, debug } = await req.json();
-  if (!conversationId) return jsonError(400, "conversationId is required");
-  if (!message?.trim()) return jsonError(400, "message is required");
-
-  const anthropic = new Anthropic({ apiKey: Netlify.env.get("ANTHROPIC_API_KEY") });
-  const carrierStore = getStore({ name: "carrier-docs", consistency: "strong" });
-  const clientStore = getStore({ name: "client-docs", consistency: "strong" });
-  const convStore = getStore({ name: "conversations", consistency: "strong" });
-
-  let supabase = null, openai = null;
-  try {
-    supabase = createClient(Netlify.env.get("SUPABASE_URL"), Netlify.env.get("SUPABASE_SERVICE_KEY"));
-    openai = new OpenAI({ apiKey: Netlify.env.get("OPENAI_API_KEY") });
-  } catch { /* narrative research degrades to "none" below if these are unavailable */ }
-
+// Everything needed to build the final model's `messages` array: loading or
+// creating the conversation record, triage, document loading, and multi-
+// query research. Factored out of the handler so both the debug path (which
+// returns plain JSON, no streaming) and the real streaming path can share it
+// -- the streaming path runs this INSIDE the stream's start() callback (see
+// below) so the response opens and a heartbeat starts before any of this
+// work begins, instead of after.
+async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, conversationId, message }) {
   let record = await loadConversation(convStore, userId, conversationId);
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);
 
@@ -569,13 +550,49 @@ export default async function handler(req) {
     mergedStatus[carrier] = (tableStatus[carrier] !== "none" || narrativeStatus[carrier] !== "none") ? "uploaded" : "none";
   }
 
+  return {
+    record, isFollowUp, tableStatus, narrativeStatus, mergedStatus, messages,
+    selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord,
+  };
+}
+
+export default async function handler(req) {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+
+  let userId;
+  try {
+    userId = await requireUser(req.headers.get("authorization"));
+  } catch {
+    return jsonError(401, "Unauthorized");
+  }
+
+  if (req.method !== "POST") return jsonError(405, "Method not allowed");
+
+  const { conversationId, message, debug } = await req.json();
+  if (!conversationId) return jsonError(400, "conversationId is required");
+  if (!message?.trim()) return jsonError(400, "message is required");
+
+  const anthropic = new Anthropic({ apiKey: Netlify.env.get("ANTHROPIC_API_KEY") });
+  const carrierStore = getStore({ name: "carrier-docs", consistency: "strong" });
+  const clientStore = getStore({ name: "client-docs", consistency: "strong" });
+  const convStore = getStore({ name: "conversations", consistency: "strong" });
+
+  let supabase = null, openai = null;
+  try {
+    supabase = createClient(Netlify.env.get("SUPABASE_URL"), Netlify.env.get("SUPABASE_SERVICE_KEY"));
+    openai = new OpenAI({ apiKey: Netlify.env.get("OPENAI_API_KEY") });
+  } catch { /* narrative research degrades to "none" below if these are unavailable */ }
+
+  const ctxArgs = { anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, conversationId, message };
+
   if (debug) {
+    const ctx = await buildAnalysisContext(ctxArgs);
     return new Response(JSON.stringify({
-      isFollowUp, tableStatus, narrativeStatus, mergedStatus,
-      carrierSelection: isFollowUp ? (record.carrierSelection || {}) : selectedForRecord,
-      tier: isFollowUp ? (record.tier || {}) : tierForRecord,
-      narrativeChunks: (narrativeChunksForRecord || []).map((m) => ({ carrier: m.carrier, slot: m.slot_label || m.slot_id, page: m.page_number, preview: (m.content || "").slice(0, 120) })),
-      firstMessageBlockCount: messages[0].content.length, turnsSoFar: record.turns.length,
+      isFollowUp: ctx.isFollowUp, tableStatus: ctx.tableStatus, narrativeStatus: ctx.narrativeStatus, mergedStatus: ctx.mergedStatus,
+      carrierSelection: ctx.isFollowUp ? (ctx.record.carrierSelection || {}) : ctx.selectedForRecord,
+      tier: ctx.isFollowUp ? (ctx.record.tier || {}) : ctx.tierForRecord,
+      narrativeChunks: (ctx.narrativeChunksForRecord || []).map((m) => ({ carrier: m.carrier, slot: m.slot_label || m.slot_id, page: m.page_number, preview: (m.content || "").slice(0, 120) })),
+      firstMessageBlockCount: ctx.messages[0].content.length, turnsSoFar: ctx.record.turns.length,
       accessLog: await readAccessLog(userId, conversationId),
     }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
@@ -585,6 +602,33 @@ export default async function handler(req) {
 
   const stream = new ReadableStream({
     async start(controller) {
+      // Keep the connection alive from the very first byte, not just during
+      // the final model call. Triage, document loading, and multi-query
+      // research all happen below and can take several seconds on their own
+      // -- previously none of that sent a single byte to the client (the
+      // Response wasn't even constructed until all of it finished), which
+      // is exactly the kind of silent gap an idle-connection proxy timeout
+      // kills. Comment-only SSE lines (":...") are inert to the frontend's
+      // parser (no "data:" line means it's skipped) but keep bytes flowing.
+      const heartbeat = setInterval(() => {
+        try { controller.enqueue(encoder.encode(": ping\n\n")); } catch { /* controller may already be closed */ }
+      }, 8000);
+      const stopHeartbeat = () => clearInterval(heartbeat);
+
+      let ctx;
+      try {
+        ctx = await buildAnalysisContext(ctxArgs);
+      } catch (err) {
+        stopHeartbeat();
+        controller.enqueue(sse("error", { error: err.message }));
+        controller.close();
+        return;
+      }
+      const {
+        record, isFollowUp, tableStatus, narrativeStatus, mergedStatus, messages,
+        selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord,
+      } = ctx;
+
       if (!isFollowUp) controller.enqueue(sse("meta", { carrierStatus: mergedStatus }));
       let replyText = "";
       try {
@@ -621,15 +665,18 @@ export default async function handler(req) {
             const final = await anthropicStream.finalMessage();
             stopReason = final?.stop_reason || stopReason;
           } catch { /* finalMessage best-effort only */ }
+          stopHeartbeat();
           controller.enqueue(sse("error", { error: `Model returned no text (stop_reason: ${stopReason}). Try again or narrow the client profile.` }));
           controller.close();
           return;
         }
       } catch (err) {
+        stopHeartbeat();
         controller.enqueue(sse("error", { error: err.message }));
         controller.close();
         return;
       }
+      stopHeartbeat();
 
       const now = new Date().toISOString();
       record.updatedAt = now;
