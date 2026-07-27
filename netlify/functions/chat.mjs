@@ -141,22 +141,26 @@ async function buildCarrierContentBlocks(store, slotIdsByCarrier, carrierStatus,
       continue;
     }
     const slotIds = slotIdsByCarrier[carrier] || [];
-    const docBlocks = [];
-    for (const slotId of slotIds) {
+    // Fetch every selected slot for this carrier concurrently -- these are
+    // independent blob reads (often multi-MB PDFs), and a case that selects
+    // several slots per carrier (e.g. all of a carrier's product lines) was
+    // paying for each one sequentially before the analysis call could start.
+    const fetched = await Promise.all(slotIds.map(async (slotId) => {
       const key = `${carrier}_${slotId}`;
       try {
         const buf = await store.get(key, { type: "arrayBuffer" });
-        if (!buf) continue;
+        if (!buf) return null;
         const bytes = new Uint8Array(buf);
-        if (!looksLikePdf(bytes)) continue;
-        docBlocks.push({
+        if (!looksLikePdf(bytes)) return null;
+        return {
           type: "document",
           source: { type: "base64", media_type: "application/pdf", data: Buffer.from(buf).toString("base64") },
           title: `${name} — ${SLOT_LABELS[carrier]?.[slotId] || slotId}`,
           citations: { enabled: true },
-        });
-      } catch { /* skip unreadable doc */ }
-    }
+        };
+      } catch { return null; /* skip unreadable doc */ }
+    }));
+    const docBlocks = fetched.filter(Boolean);
     if (docBlocks.length === 0) {
       carrierStatus[carrier] = "none";
       contentBlocks.push({ type: "text", text: `\n\n=== ${name.toUpperCase()}: NO GUIDELINES UPLOADED FOR THIS CARRIER ===` });
@@ -208,13 +212,13 @@ function dedupeKey(carrier, m) {
 }
 
 async function carriersWithNarrativeGuidelines(supabase) {
-  const result = [];
-  for (const carrier of CARRIERS) {
+  const checks = await Promise.all(CARRIERS.map(async (carrier) => {
     try {
       const { data } = await supabase.from("guideline_chunks").select("id").eq("carrier", carrier).limit(1);
-      if ((data?.length || 0) > 0) result.push(carrier);
-    } catch { /* treat as none uploaded */ }
-  }
+      return (data?.length || 0) > 0 ? carrier : null;
+    } catch { return null; /* treat as none uploaded */ }
+  }));
+  const result = checks.filter(Boolean);
   return result;
 }
 
@@ -284,21 +288,22 @@ async function researchNarrativeGuidance(anthropic, openai, supabase, queryText,
     if (toolUses.length === 0) break;
 
     messages.push({ role: "assistant", content: resp.content });
-    const toolResults = [];
-    for (const tu of toolUses) {
+    // Every search in a round is independent (scoped to its own carrier/query),
+    // so run them concurrently instead of one embedding+RPC round-trip at a
+    // time -- with up to 16 searches across 4 carriers, sequential execution
+    // was eating a large chunk of the function's execution budget before the
+    // final analysis call even started.
+    const toolResults = await Promise.all(toolUses.map(async (tu) => {
       if (searchCount >= MAX_SEARCHES) {
-        toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: "Search budget exhausted -- stop searching and proceed with what you have." });
-        continue;
+        return { type: "tool_result", tool_use_id: tu.id, content: "Search budget exhausted -- stop searching and proceed with what you have." };
       }
       searchCount++;
       const carrier = carriersWithGuidelines.includes(tu.input?.carrier) ? tu.input.carrier : null;
       const query = String(tu.input?.query || "").slice(0, 500);
-      let resultText = "No results.";
       if (!carrier) {
-        resultText = "Missing or invalid carrier -- every search must specify exactly one carrier from the list provided.";
-        toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: resultText });
-        continue;
+        return { type: "tool_result", tool_use_id: tu.id, content: "Missing or invalid carrier -- every search must specify exactly one carrier from the list provided." };
       }
+      let resultText = "No results.";
       try {
         const embRes = await openai.embeddings.create({ model: EMBEDDING_MODEL, input: [query] });
         const embedding = embRes.data[0].embedding;
@@ -316,8 +321,8 @@ async function researchNarrativeGuidance(anthropic, openai, supabase, queryText,
       } catch {
         resultText = "Search failed.";
       }
-      toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: resultText });
-    }
+      return { type: "tool_result", tool_use_id: tu.id, content: resultText };
+    }));
     messages.push({ role: "user", content: toolResults });
     if (searchCount >= MAX_SEARCHES) break;
   }
