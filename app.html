@@ -629,6 +629,24 @@ async function openConversation(id) {
     urow.innerHTML = `<div class="bubble">${esc(data.profileText)}</div>`;
     msgs.appendChild(urow);
 
+    // Full recommendation records (with any prior agent_reviewed/agent_agreed
+    // state) are fetched once per reopen -- each turn only carries the
+    // lightweight {key, flaggedForReview, flagReason} pointer, not the
+    // review state itself, to keep the conversation record small.
+    let recByKey = {};
+    try {
+      const tk2 = await token();
+      const recRes = await fetch('/.netlify/functions/list-recommendations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk2}` },
+        body: JSON.stringify({ conversationId: id }),
+      });
+      if (recRes.ok) {
+        const { recommendations } = await recRes.json();
+        recByKey = Object.fromEntries((recommendations || []).map(r => [r.key, r]));
+      }
+    } catch { /* badges/thumbs are supplementary -- reopening the thread must not fail without them */ }
+
     data.turns.forEach((t, i) => {
       const row = document.createElement('div');
       row.className = `msg ${t.role}`;
@@ -638,6 +656,7 @@ async function openConversation(id) {
       const txt = document.createElement('div');
       txt.innerHTML = renderMd(t.text);
       bubble.appendChild(txt);
+      if (t.recommendation) renderRecommendationControls(bubble, id, t.recommendation, recByKey[t.recommendation.key]);
       row.appendChild(bubble);
       msgs.appendChild(row);
     });
@@ -651,6 +670,68 @@ async function openConversation(id) {
 }
 
 const CARRIER_STATUS_LABEL = { none: 'not uploaded', uploaded: 'checked', matched: 'checked' };
+
+// Renders the flagged-for-review badge (from the numeric cross-check) and a
+// lightweight thumbs-up/down control an agent can use once they know the
+// real carrier outcome -- this is the shadow-mode validation dataset: there's
+// no pre-existing labeled-outcome set, so this is how one gets built up over
+// time instead of requiring one up front. `recInfo` is {key, flaggedForReview,
+// flagReason}; `reviewState` (optional) is the fuller stored record, used
+// when reopening a past conversation to reflect an already-submitted review.
+function renderRecommendationControls(bubble, convId, recInfo, reviewState) {
+  if (!recInfo?.key) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'rec-controls';
+  wrap.style.cssText = 'margin-top:.75rem;padding-top:.6rem;border-top:1px solid var(--border);display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;font-size:.8rem;';
+
+  if (recInfo.flaggedForReview) {
+    const flag = document.createElement('div');
+    flag.style.cssText = 'color:#E85D2F;display:flex;align-items:center;gap:.35rem;';
+    flag.innerHTML = `<i class="ti ti-alert-triangle"></i><span>Flagged for review${recInfo.flagReason ? ': ' + esc(recInfo.flagReason) : ''}</span>`;
+    wrap.appendChild(flag);
+  }
+
+  const reviewRow = document.createElement('div');
+  reviewRow.style.cssText = 'display:flex;align-items:center;gap:.4rem;color:var(--muted);margin-left:auto;';
+  const label = document.createElement('span');
+  label.textContent = reviewState?.agentReviewed ? 'Outcome recorded:' : 'Know the real outcome?';
+  reviewRow.appendChild(label);
+
+  const mkBtn = (agreed, icon, title) => {
+    const b = document.createElement('button');
+    b.className = 'btn-so';
+    b.title = title;
+    b.innerHTML = `<i class="ti ${icon}"></i>`;
+    b.style.cssText = 'padding:.25rem .5rem;';
+    if (reviewState?.agentReviewed && reviewState.agentAgreed === agreed) {
+      b.style.borderColor = agreed ? 'var(--green)' : '#E85D2F';
+      b.style.color = agreed ? 'var(--green)' : '#E85D2F';
+    }
+    b.onclick = async () => {
+      try {
+        const tk = await token();
+        await fetch('/.netlify/functions/review-recommendation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
+          body: JSON.stringify({ conversationId: convId, key: recInfo.key, agentAgreed: agreed }),
+        });
+        label.textContent = 'Outcome recorded:';
+        [upBtn, downBtn].forEach(x => { x.style.borderColor = ''; x.style.color = ''; });
+        b.style.borderColor = agreed ? 'var(--green)' : '#E85D2F';
+        b.style.color = agreed ? 'var(--green)' : '#E85D2F';
+        toast('Thanks -- this helps validate future recommendations.', 'ok');
+      } catch { toast('Could not record outcome', 'err'); }
+    };
+    return b;
+  };
+  const upBtn = mkBtn(true, 'ti-thumb-up', 'Carrier placed the client as recommended');
+  const downBtn = mkBtn(false, 'ti-thumb-down', 'Carrier did NOT place the client as recommended');
+  reviewRow.appendChild(upBtn);
+  reviewRow.appendChild(downBtn);
+  wrap.appendChild(reviewRow);
+
+  bubble.appendChild(wrap);
+}
 
 async function send() {
   const inp = document.getElementById('chat-in');
@@ -720,6 +801,8 @@ async function send() {
           replyText += data.text;
           txt.innerHTML = renderMd(replyText);
           scrollB();
+        } else if (eventType === 'recommendation') {
+          renderRecommendationControls(bubble, conversationId, data, null);
         } else if (eventType === 'error') {
           throw new Error(data.error || 'Stream error');
         }

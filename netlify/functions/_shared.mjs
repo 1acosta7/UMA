@@ -119,3 +119,58 @@ export async function readAccessLog(userId, conversationId) {
     return [];
   }
 }
+
+// Structured, machine-readable recommendation records -- one per analysis
+// turn that actually produced a recommendation (not per conversation, and
+// not per follow-up question that didn't). Deliberately a SEPARATE store
+// from `conversations`: that record is read-modify-written on every turn
+// (see loadConversation/saveConversation above) and a later turn's save
+// would silently overwrite an earlier turn's recommendation if this lived
+// as a field on it. Every key is unique (timestamp+uuid) so a record, once
+// written, is never the target of a future write from a *different*
+// analysis turn -- the only legitimate mutation of an existing key is the
+// agent-review update below, which is an intentional, narrow field-level
+// patch (agent_reviewed/agent_agreed), not a silent overwrite.
+export function recommendationKey(userId, conversationId, timestamp, id) {
+  return `${userId}/${conversationId}/${timestamp}-${id}`;
+}
+
+export async function saveRecommendation(record) {
+  const store = getStore({ name: "recommendations", consistency: "strong" });
+  const id = crypto.randomUUID();
+  const key = recommendationKey(record.userId, record.conversationId, record.timestamp, id);
+  const full = { ...record, id, key };
+  await store.set(key, JSON.stringify(full), { metadata: { userId: record.userId, conversationId: record.conversationId } });
+  return full;
+}
+
+export async function listRecommendations(userId, conversationId) {
+  const store = getStore({ name: "recommendations", consistency: "strong" });
+  try {
+    const { blobs } = await store.list({ prefix: `${userId}/${conversationId}/` });
+    const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));
+    return entries.filter(Boolean).map((t) => JSON.parse(t)).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  } catch {
+    return [];
+  }
+}
+
+// The one sanctioned update path: an agent marking whether they later
+// learned the real carrier outcome, and whether it matched. This is the
+// shadow-mode validation dataset -- there's no pre-existing labeled-outcome
+// set, so this is how one gets built up over time. Scoped to exactly these
+// two review fields (plus a reviewedAt stamp) so it can never be used to
+// rewrite the original recommendation itself.
+export async function updateRecommendationReview(userId, conversationId, key, { agentReviewed, agentAgreed, notes }) {
+  const store = getStore({ name: "recommendations", consistency: "strong" });
+  const text = await store.get(key, { type: "text" });
+  if (!text) throw new Error("Recommendation not found");
+  const record = JSON.parse(text);
+  if (record.userId !== userId || record.conversationId !== conversationId) throw new Error("Recommendation does not belong to this conversation");
+  record.agentReviewed = !!agentReviewed;
+  record.agentAgreed = agentAgreed === null || agentAgreed === undefined ? null : !!agentAgreed;
+  record.reviewNotes = notes || null;
+  record.reviewedAt = new Date().toISOString();
+  await store.set(key, JSON.stringify(record), { metadata: { userId, conversationId } });
+  return record;
+}

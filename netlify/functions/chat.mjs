@@ -5,8 +5,9 @@ import { createClient } from "@supabase/supabase-js";
 import {
   CORS, jsonError, requireUser, looksLikePdf, clientDocPrefix,
   loadConversation, saveConversation, logAccess, readAccessLog,
-  CARRIERS, CARRIER_NAMES, SLOT_LABELS,
+  CARRIERS, CARRIER_NAMES, SLOT_LABELS, saveRecommendation,
 } from "./_shared.mjs";
+import { crossCheckBuild, crossCheckA1C, crossCheckPSA } from "./_lookup.mjs";
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
 
@@ -43,7 +44,7 @@ In final expense (FEX) documents, "Select" and "Graded" are BENEFIT LEVELS -- no
 EVALUATION PROCESS -- follow every time, internally, before writing anything:
 
 1. Find the binding constraint(s). Identify the condition(s), medication(s), or lab value(s) with a hard numeric/threshold trigger that varies by carrier and could realistically flip accept vs. decline. Ignore near-universal Accept/Select conditions as decision drivers.
-2. Evaluate each carrier independently. For each carrier with guidelines uploaded: consider ONLY that carrier's retrieved guidance -- never cross-reference another carrier's chart while doing this -- check each condition, medication, and lab value against that carrier's own rules separately, determine the single best product that carrier offers this case, and assign a confidence level (High/Medium/Low) based only on what was actually retrieved for that carrier.
+2. Evaluate each carrier independently, as an explicit chain, not a vague impression. For each carrier with guidelines uploaded: consider ONLY that carrier's retrieved guidance -- never cross-reference another carrier's chart while doing this -- and for each condition, medication, and lab value, resolve it through this exact chain: the specific guideline text/page that governs it -> the client's specific data point for it -> whether it's a match or no-match against that guideline text -> the resulting rate class it implies. Do this for every condition against every carrier before concluding anything. Determine the single best product that carrier offers this case, and assign a confidence level (High/Medium/Low) based only on what was actually retrieved for that carrier. The Source line you eventually write is not a separate citation you invent afterward -- it is a direct readout of this chain for the winning carrier. If you can't point to the specific chain step that produced your Source line, your Source line is wrong.
 3. Check stacking per-carrier, every time. Never assume independence or stacking across conditions. Look for explicit language on comorbidity/stacking; if a carrier is silent on it, that uncertainty factors into its confidence level.
 4. Compare only the recommended products. Once every carrier has a product + confidence, compare across carriers and select the single strongest overall fit, prioritizing in this order: highest likelihood of approval, best product fit, simplest underwriting path, least underwriting friction, strongest documentary evidence.
 5. Commit vs. ask. Commit to a recommendation when guideline text resolves the case with no interpretation gap. Ask ONLY when missing data could change which carrier/product wins -- never for data that would only shift the degree within an already-clear winner.
@@ -556,6 +557,143 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
   };
 }
 
+// Turns the finished, already-streamed prose answer into a schema-valid
+// structured record, via a forced tool call on claude-haiku-4-5 -- not by
+// asking the main claude-sonnet-5 call to interleave a full essay AND
+// perfect nested JSON in one pass, and not by regex-parsing prose. Tool-use
+// input is schema-guaranteed valid JSON, which free-text JSON emitted mid-
+// stream is not.
+//
+// Important, disclosed limitation: this call does NOT re-attach the native
+// PDF documents (that would reintroduce the exact prefill-timeout risk this
+// session just fixed). It only sees the client profile, the final visible
+// answer text, and the already-retrieved narrative chunks (plain text, not
+// PDFs). Because the anti-carrier-naming rule means the visible answer never
+// writes down non-winning carriers' reasoning, this call can only recover a
+// well-grounded chain for the WINNING carrier from that text; for every
+// other carrier, its chain entry will be well-grounded only if narrative
+// chunks were retrieved for it, and marked "insufficient retrieved text"
+// otherwise. This is a real, structural gap -- not a bug -- flagged in the
+// implementation report.
+const EXTRACT_SYSTEM = `You are converting a finished life insurance underwriting recommendation into a structured record. You are NOT re-deciding the case -- the recommendation was already made; your job is to faithfully represent what was concluded and why, using only the client profile, the final answer text, and the retrieved guideline excerpts you're given below.
+
+Call record_structured_recommendation exactly once.
+
+If the final answer was a clarifying question or an "insufficient evidence" response with no actual product recommendation, set hasRecommendation to false and omit the recommendation fields -- do not invent one.
+
+For the resolution chain: reconstruct it ONLY from what the final answer text and retrieved excerpts actually support. For the recommended (winning) carrier, the final answer's Why/Source text should give you enough to reconstruct a real per-condition chain. For every OTHER carrier mentioned in the retrieved excerpts (even though the visible answer never names them), reconstruct whatever chain you can from those excerpts alone. If you don't have enough retrieved text to responsibly reconstruct a carrier's chain, add an entry for it with a single step noting "insufficient retrieved text to reconstruct chain" rather than guessing or leaving it out silently.
+
+For clientNumerics: extract the client's stated height (to total inches), weight (lbs), A1C, and PSA ONLY if explicitly present in the client profile text -- omit any field that wasn't actually stated, never estimate or infer one.
+
+Never invent a page number, quote, or rate class that isn't traceable to the text you were given.`;
+
+const EXTRACT_TOOL = {
+  name: "record_structured_recommendation",
+  description: "Record the structured, machine-readable form of a just-completed underwriting recommendation, including the per-carrier rule-citation resolution chain.",
+  input_schema: {
+    type: "object",
+    properties: {
+      hasRecommendation: { type: "boolean", description: "false if the final answer was a clarifying question or an insufficient-evidence response with no product recommendation." },
+      recommendedCarrier: { type: "string", enum: CARRIERS, description: "Carrier id of the recommended product. Omit if hasRecommendation is false." },
+      recommendedProduct: { type: "string" },
+      rateClass: { type: "string" },
+      confidence: { type: "string", enum: ["High", "Medium", "Low"] },
+      sourceDocId: { type: "string", description: "Slot id of the specific document the Source line traces to (e.g. 'fe_express')." },
+      sourcePage: { type: "number" },
+      ruleQuote: { type: "string", description: "The specific guideline text (short quote or close paraphrase) that was the deciding rule." },
+      bindingConstraint: { type: "string", description: "The condition/medication/lab value that actually drove the outcome." },
+      clientNumerics: {
+        type: "object",
+        properties: {
+          heightIn: { type: "number", description: "Client height in total inches, only if explicitly stated." },
+          weightLbs: { type: "number" },
+          a1c: { type: "number" },
+          psa: { type: "number" },
+        },
+      },
+      chain: {
+        type: "array",
+        description: "One entry per carrier that had retrieved guidance available, including non-winning carriers.",
+        items: {
+          type: "object",
+          properties: {
+            carrier: { type: "string", enum: CARRIERS },
+            steps: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  clientDataPoint: { type: "string" },
+                  guidelineQuote: { type: "string" },
+                  sourceDocId: { type: "string" },
+                  sourcePage: { type: "number" },
+                  match: { type: "boolean" },
+                  resultingRateClass: { type: "string" },
+                },
+                required: ["clientDataPoint"],
+              },
+            },
+            carrierConclusion: { type: "string" },
+            carrierConfidence: { type: "string" },
+          },
+          required: ["carrier", "steps"],
+        },
+      },
+    },
+    required: ["hasRecommendation"],
+  },
+};
+
+async function extractStructuredRecommendation(anthropic, { profileText, replyText, narrativeChunks }) {
+  const chunkText = (narrativeChunks || [])
+    .slice(0, 40)
+    .map((m) => `[${CARRIER_NAMES[m.carrier] || m.carrier} — ${m.slot_label || m.slot_id}, p.${m.page_number}]: ${(m.content || "").slice(0, 500)}`)
+    .join("\n\n");
+
+  const userText = `CLIENT PROFILE:\n${profileText}\n\nFINAL ANSWER GIVEN TO THE AGENT:\n${replyText}\n\nRETRIEVED GUIDELINE EXCERPTS (narrative search results, may cover carriers beyond the recommended one):\n${chunkText || "(none retrieved)"}`;
+
+  try {
+    const resp = await anthropic.messages.create({
+      model: "claude-haiku-4-5",
+      max_tokens: 3000,
+      system: EXTRACT_SYSTEM,
+      tools: [EXTRACT_TOOL],
+      tool_choice: { type: "tool", name: "record_structured_recommendation" },
+      messages: [{ role: "user", content: userText }],
+    });
+    const toolUse = resp.content.find((b) => b.type === "tool_use" && b.name === "record_structured_recommendation");
+    return toolUse?.input || null;
+  } catch {
+    return null; // extraction failed -- no structured record for this turn (disclosed gap, see report)
+  }
+}
+
+// Lightweight numeric cross-check (see _lookup.mjs): never overrides or
+// hides the model's own answer, only flags a discrepancy between the rate
+// class the model cited and a small, source-grounded lookup table for
+// build/BMI (and A1C/PSA where any carrier's ingested documents actually use
+// a numeric cutoff for them -- currently none do, see _lookup.mjs).
+function runNumericCrossCheck(structured) {
+  if (!structured?.hasRecommendation || !structured.recommendedCarrier) return { flagged: false, checks: [] };
+  const { recommendedCarrier: carrier, rateClass, clientNumerics = {} } = structured;
+
+  const buildCheck = crossCheckBuild({ carrier, heightIn: clientNumerics.heightIn, weightLbs: clientNumerics.weightLbs, statedClass: rateClass });
+  const a1cCheck = crossCheckA1C({ carrier, a1c: clientNumerics.a1c, statedOutcome: rateClass });
+  const psaCheck = crossCheckPSA({ carrier, psa: clientNumerics.psa, statedOutcome: rateClass });
+
+  const checks = [
+    { field: "build", ...buildCheck },
+    { field: "a1c", ...a1cCheck },
+    { field: "psa", ...psaCheck },
+  ];
+  const disagreement = checks.find((c) => c.checked && c.agrees === false);
+  return {
+    flagged: !!disagreement,
+    flagReason: disagreement ? `Numeric cross-check disagreement on ${disagreement.field}: ${disagreement.detail}` : null,
+    checks,
+  };
+}
+
 export default async function handler(req) {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
@@ -676,7 +814,6 @@ export default async function handler(req) {
         controller.close();
         return;
       }
-      stopHeartbeat();
 
       const now = new Date().toISOString();
       record.updatedAt = now;
@@ -687,17 +824,59 @@ export default async function handler(req) {
       record.narrativeChunks = narrativeChunksForRecord;
       record.narrativeStatus = narrativeStatus;
       record.carrierStatus = mergedStatus;
+
+      // Structured recommendation record: a second, cheap tool-forced
+      // extraction pass (see extractStructuredRecommendation) reads back the
+      // already-completed answer and produces schema-valid structured data,
+      // then the numeric cross-check runs against it. Heartbeat stays alive
+      // through this -- it's a real network call, and staying silent here
+      // would reopen the same idle-timeout risk the earlier restructure
+      // fixed, even though the user's visible answer has already fully
+      // streamed by this point.
+      let recommendationInfo = null;
+      try {
+        const profileTextForExtraction = isFollowUp ? `${record.profileText}\n\nFollow-up: ${message}` : message;
+        const structured = await extractStructuredRecommendation(anthropic, {
+          profileText: profileTextForExtraction, replyText, narrativeChunks: narrativeChunksForRecord,
+        });
+        if (structured?.hasRecommendation) {
+          const crossCheck = runNumericCrossCheck(structured);
+          const saved = await saveRecommendation({
+            userId, conversationId, timestamp: now,
+            recommendedCarrier: structured.recommendedCarrier || null,
+            recommendedProduct: structured.recommendedProduct || null,
+            rateClass: structured.rateClass || null,
+            confidence: structured.confidence || null,
+            sourceDocId: structured.sourceDocId || null,
+            sourcePage: structured.sourcePage ?? null,
+            ruleQuote: structured.ruleQuote || null,
+            bindingConstraint: structured.bindingConstraint || null,
+            clientNumerics: structured.clientNumerics || {},
+            chain: structured.chain || [],
+            flaggedForReview: crossCheck.flagged,
+            flagReason: crossCheck.flagReason,
+            numericChecks: crossCheck.checks,
+            agentReviewed: false,
+            agentAgreed: null,
+          });
+          recommendationInfo = { key: saved.key, flaggedForReview: saved.flaggedForReview, flagReason: saved.flagReason };
+        }
+      } catch { /* extraction/cross-check/persistence failing must never block the reply the agent already received */ }
+
+      stopHeartbeat();
+      if (recommendationInfo) controller.enqueue(sse("recommendation", recommendationInfo));
+
       if (!isFollowUp) {
         record.profileText = message;
         record.carrierSelection = selectedForRecord;
         record.tier = tierForRecord;
         record.tableStatus = tableStatus;
         record.clientDocKeys = clientDocKeysForRecord;
-        record.turns.push({ role: "assistant", text: replyText });
+        record.turns.push({ role: "assistant", text: replyText, recommendation: recommendationInfo });
         if (!record.label) record.label = deriveLabel(record.profileText, replyText);
       } else {
         record.turns.push({ role: "user", text: message });
-        record.turns.push({ role: "assistant", text: replyText });
+        record.turns.push({ role: "assistant", text: replyText, recommendation: recommendationInfo });
       }
       try {
         await saveConversation(convStore, userId, conversationId, record);
