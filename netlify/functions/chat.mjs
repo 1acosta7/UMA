@@ -829,7 +829,15 @@ async function extractStructuredRecommendation(anthropic, { profileText, replyTe
 // _lookup.mjs) never for the client simply not having provided a value.
 // This is what makes "not evaluated" visibly different from "evaluated and
 // passed" instead of both looking like silence.
-function runNumericCrossCheck(structured) {
+// `ageYears` comes from the pre-triage structured intake extraction
+// (extractClientIntake/INTAKE_TOOL), a separate extraction pass from the
+// clientNumerics this function otherwise relies on -- it's threaded in from
+// buildAnalysisContext's intakeForDebug at the call site below, the same way
+// `product` is threaded in from structured.recommendedProduct. Only the two
+// age-banded build variants (Foresters BrightFuture Juvenile, Transamerica
+// FFIUL II Express -- see _lookup.mjs) actually use it; every other check is
+// unaffected by whether it's present.
+function runNumericCrossCheck(structured, ageYears) {
   if (!structured?.hasRecommendation) return { flagged: false, checks: [], dataGaps: { winner: null, others: [] } };
   const { recommendedCarrier, rateClass } = structured;
   // Destructuring defaults only cover `undefined`, not other falsy/malformed
@@ -857,7 +865,7 @@ function runNumericCrossCheck(structured) {
     const product = carrier === recommendedCarrier ? structured.recommendedProduct : undefined;
 
     const checks = [
-      { field: "build", ...crossCheckBuild({ carrier, heightIn: clientNumerics.heightIn, weightLbs: clientNumerics.weightLbs, statedClass, product }) },
+      { field: "build", ...crossCheckBuild({ carrier, heightIn: clientNumerics.heightIn, weightLbs: clientNumerics.weightLbs, statedClass, product, ageYears }) },
       { field: "a1c", ...crossCheckA1C({ carrier, a1c: clientNumerics.a1c, statedOutcome: statedClass, product }) },
       { field: "psa", ...crossCheckPSA({ carrier, psa: clientNumerics.psa, statedOutcome: statedClass }) },
     ];
@@ -968,7 +976,7 @@ export default async function handler(req) {
       }
       const {
         record, isFollowUp, cacheHit, cacheKey, cachedReplyText, cachedRecommendation,
-        tableStatus, narrativeStatus, mergedStatus, messages,
+        tableStatus, narrativeStatus, mergedStatus, messages, intakeForDebug,
         selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord,
       } = ctx;
 
@@ -1169,7 +1177,13 @@ export default async function handler(req) {
           }
 
           if (structured?.hasRecommendation) {
-            const crossCheck = runNumericCrossCheck(structured);
+            // intakeForDebug is populated by the pre-triage intake extraction
+            // (extractClientIntake), which only runs on the first turn of a
+            // conversation with no attached client documents -- age is
+            // undefined on follow-ups or when documents are attached, and
+            // the two age-banded build variants below correctly report
+            // no_client_data for those cases rather than guessing.
+            const crossCheck = runNumericCrossCheck(structured, intakeForDebug?.age);
             const recordFields = {
               recommendedCarrier: structured.recommendedCarrier || null,
               recommendedProduct: structured.recommendedProduct || null,

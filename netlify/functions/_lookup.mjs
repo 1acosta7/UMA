@@ -349,7 +349,12 @@ export const NUMERIC_LOOKUP = {
       variants: [
         { id: "fe_express", label: "FE Express Solution Adult Build Chart", matchKeywords: ["fe express"], kind: "bmi_bands", sourceDocId: "transamerica_fe_express", sourcePage: 14, data: TRANSAMERICA_FEX_BMI_BANDS },
         { id: "lifetime_blended", label: "Transamerica Lifetime / FCIUL II Blended BMI Chart", matchKeywords: ["lifetime", "fciul", "financial choice iul"], kind: "bmi_bands", sourceDocId: "transamerica_lifetime_field_guide", sourcePage: 17, data: TRANSAMERICA_LIFETIME_BLENDED_BMI_BANDS, caveat: "Age-blended (see chart comment): uses the more conservative 60+ classification at the narrow 16.0001-18.0000 BMI band since client age isn't passed to this cross-check." },
-        { id: "ffiul_ii_express", label: "FFIUL II Express Adult BMI chart", matchKeywords: ["ffiul ii express", "financial foundation iul ii express", "financial foundation iul® ii express", "ffiul® ii express"], kind: "requires_age", note: "FFIUL II Express's BMI chart is meaningfully age-banded (16-59 vs 60-75, different weight bounds at every height) and client age isn't passed to this cross-check -- data is recorded in _lookup.mjs (TRANSAMERICA_FFIUL_II_EXPRESS_BMI_TABLE) for when age is added to the intake pipeline." },
+        {
+          id: "ffiul_ii_express", label: "FFIUL II Express Adult BMI chart",
+          matchKeywords: ["ffiul ii express", "financial foundation iul ii express", "financial foundation iul® ii express", "ffiul® ii express"],
+          kind: "requires_age", sourceDocId: "transamerica_ffiul_ii_express", sourcePage: 32, data: TRANSAMERICA_FFIUL_II_EXPRESS_BMI_TABLE,
+          note: "FFIUL II Express's BMI chart is meaningfully age-banded (16-59 vs 60-75, different weight bounds at every height) and client age wasn't available to this cross-check for this case.",
+        },
       ],
     },
     a1c: { available: false, note: "Confirmed carrier-wide across all 6 ingested Transamerica documents: FE Express gates diabetes on an insulin-use flag, Lifetime WL caps diabetes at Standard rate class regardless of A1C, and FFIUL II Express declines diabetes via an age-of-diagnosis/insulin/complication flag combination -- no Transamerica product uses a numeric A1C cutoff." },
@@ -395,7 +400,8 @@ export const NUMERIC_LOOKUP = {
         },
         {
           id: "juvenile", label: "Juvenile Build Chart (age 0-15)", matchKeywords: ["brightfuture"],
-          kind: "requires_age", note: "BrightFuture's Juvenile Build Chart is age-banded (infant length/weight for ages 0-2, BMI-by-age for ages 3-15) and client age isn't passed to this cross-check -- data is recorded in _lookup.mjs (FORESTERS_JUVENILE_INFANT_LENGTH_WEIGHT / FORESTERS_JUVENILE_BMI_BY_AGE) for when age is added to the intake pipeline.",
+          kind: "requires_age", sourceDocId: "foresters_main_uw_apr26", sourcePage: 12,
+          note: "BrightFuture's Juvenile Build Chart is age-banded (infant length/weight for ages 0-2, BMI-by-age for ages 3-15) and client age wasn't available to this cross-check for this case.",
         },
         {
           id: "accelerated_uw", label: "Accelerated Underwriting Program build guidelines", matchKeywords: ["accelerated underwriting"],
@@ -525,15 +531,82 @@ function classifyAllianzSubstandardTable(heightIn, weightLbs) {
   return "Individual Consideration (above Table 12/400%)";
 }
 
+// Foresters BrightFuture -- Juvenile Build Chart (age 0-15). Two age-band
+// styles per the source: infant length/weight range for ages 0-2, BMI-by-age
+// for ages 3-15 (heightIn is treated as length in inches for the infant
+// band -- the only geometric measurement this cross-check receives). Returns
+// null if the age/height combination isn't covered by the transcribed table,
+// or { outOfRange: true } if ageYears falls outside 0-15 entirely (this
+// chart doesn't apply -- BrightFuture's own issue age is 15 days-17, so ages
+// 16-17 are real but simply have no juvenile chart row; treated the same as
+// out-of-range here rather than guessing).
+function classifyForestersJuvenile(ageYears, heightIn, weightLbs) {
+  if (ageYears < 0 || ageYears > 15) return { outOfRange: true };
+  const ageInt = Math.floor(ageYears);
+  if (ageInt <= 2) {
+    const row = FORESTERS_JUVENILE_INFANT_LENGTH_WEIGHT.find((r) => r.ageYears === ageInt);
+    if (!row) return null;
+    const withinLength = heightIn >= row.lengthInMin && heightIn <= row.lengthInMax;
+    const withinWeight = weightLbs >= row.weightLbsMin && weightLbs <= row.weightLbsMax;
+    const within = withinLength && withinWeight;
+    return {
+      class: within
+        ? `within Foresters' infant length/weight guidelines for age ${ageInt}`
+        : `outside Foresters' infant length/weight guidelines for age ${ageInt} -- individual consideration`,
+      row,
+    };
+  }
+  const row = FORESTERS_JUVENILE_BMI_BY_AGE.find((r) => r.ageYears === Math.round(ageYears));
+  if (!row) return null;
+  const bmi = bmiFromHeightWeight(heightIn, weightLbs);
+  const within = bmi >= row.bmiMin && bmi <= row.bmiMax;
+  return {
+    class: within
+      ? `BMI ${Math.round(bmi * 10) / 10} within Foresters' juvenile guidelines for age ${row.ageYears}`
+      : `BMI ${Math.round(bmi * 10) / 10} outside Foresters' juvenile guidelines for age ${row.ageYears} -- individual consideration`,
+    row, computedBMI: bmi,
+  };
+}
+
+// Transamerica FFIUL II Express -- Adult BMI chart (age-banded: 16-59 vs
+// 60-75). Decline/Select-only product -- "outside the Select range" doesn't
+// itself mean Decline per the source text, but is the closest signal this
+// chart gives; phrased as such below rather than asserting a firm Decline.
+// Returns null if the height isn't covered by the selected age band's table,
+// or { outOfRange: true } if ageYears falls outside both bands (16-75).
+function classifyTransamericaFfiulExpress(ageYears, heightIn, weightLbs) {
+  let band;
+  if (ageYears >= 16 && ageYears <= 59) band = "16-59";
+  else if (ageYears >= 60 && ageYears <= 75) band = "60-75";
+  else return { outOfRange: true };
+  const row = TRANSAMERICA_FFIUL_II_EXPRESS_BMI_TABLE[band].find((r) => r.heightIn === heightIn);
+  if (!row) return null;
+  const within = weightLbs >= row.min && weightLbs <= row.max;
+  return {
+    class: within ? "Select" : "outside the Select build range for this height/age (individual consideration / decline territory)",
+    row, band,
+  };
+}
+
 // The actual cross-check: given a carrier id, the client's stated
-// height/weight, the rate class the final model's answer claimed, and the
-// recommended product's free-text name (used only to pick the right build
-// chart variant, see selectVariant), checks whether the lookup table agrees.
-// Never used to pick or override an answer -- only to flag disagreement for
-// human review. Returns {checked: false, reason} when there's no applicable
-// lookup data (never a false flag), or {checked: true, agrees, lookupClass,
-// detail}.
-export function crossCheckBuild({ carrier, heightIn, weightLbs, statedClass, product }) {
+// height/weight/age, the rate class the final model's answer claimed, and
+// the recommended product's free-text name (used only to pick the right
+// build chart variant, see selectVariant), checks whether the lookup table
+// agrees. Never used to pick or override an answer -- only to flag
+// disagreement for human review. Returns {checked: false, reason} when
+// there's no applicable lookup data (never a false flag), or {checked: true,
+// agrees, lookupClass, detail}.
+//
+// `ageYears` comes from the pre-triage structured intake extraction (see
+// extractClientIntake/INTAKE_TOOL in chat.mjs), NOT from the post-hoc
+// clientNumerics used for height/weight/A1C/PSA -- it's threaded through
+// from a different point in the pipeline than `product` is, but the intent
+// is the same: only the two age-banded build variants (Foresters BrightFuture
+// Juvenile, Transamerica FFIUL II Express) actually need it, and both
+// honestly report no_client_data when it isn't available (follow-up turns,
+// or a conversation with attached client documents, currently never run the
+// intake extraction this age comes from) rather than guessing an age band.
+export function crossCheckBuild({ carrier, heightIn, weightLbs, statedClass, product, ageYears }) {
   const carrierEntry = NUMERIC_LOOKUP[carrier]?.build;
   if (!carrierEntry?.available) {
     // A genuine carrier-side gap (no build chart exists for this carrier at
@@ -550,7 +623,29 @@ export function crossCheckBuild({ carrier, heightIn, weightLbs, statedClass, pro
   }
 
   if (variant.kind === "requires_age") {
-    return { checked: false, reasonType: "no_client_data", reason: variant.note };
+    if (ageYears == null) {
+      return { checked: false, reasonType: "no_client_data", reason: variant.note };
+    }
+    if (heightIn == null || weightLbs == null) {
+      return { checked: false, reasonType: "no_client_data", reason: "Client height/weight not both available to check." };
+    }
+
+    const classify = variant.id === "juvenile" ? classifyForestersJuvenile : classifyTransamericaFfiulExpress;
+    const result = classify(ageYears, heightIn, weightLbs);
+    if (!result) {
+      return { checked: false, reasonType: "no_carrier_data", reason: `Age ${ageYears} / height ${heightIn}in not covered by the transcribed table range for ${variant.label}.` };
+    }
+    if (result.outOfRange) {
+      return { checked: false, reasonType: "no_carrier_data", reason: `Client age ${ageYears} is outside ${variant.label}'s covered age range -- this variant doesn't apply.` };
+    }
+    const isOutside = /outside|decline/i.test(result.class);
+    const agrees = statedClass ? (isOutside ? /decline|individual consideration/i.test(statedClass) : true) : null;
+    return {
+      checked: true, agrees, lookupClass: result.class,
+      computedBMI: result.computedBMI != null ? Math.round(result.computedBMI * 10) / 10 : undefined,
+      sourceDocId: variant.sourceDocId, sourcePage: variant.sourcePage,
+      detail: `${result.class} per ${variant.label}, p.${variant.sourcePage}.`,
+    };
   }
 
   if (heightIn == null || weightLbs == null) {
