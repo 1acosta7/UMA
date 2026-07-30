@@ -850,10 +850,15 @@ function runNumericCrossCheck(structured) {
     const statedClass = carrier === recommendedCarrier
       ? rateClass
       : chain.find((c) => c.carrier === carrier)?.carrierConclusion;
+    // Product is only known for the winning carrier (structured.recommendedProduct);
+    // the chain schema has no per-carrier product field for non-winning carriers, so
+    // build/A1C variant selection for those correctly falls back to a carrier's
+    // default variant (if any) rather than a specific product-scoped one.
+    const product = carrier === recommendedCarrier ? structured.recommendedProduct : undefined;
 
     const checks = [
-      { field: "build", ...crossCheckBuild({ carrier, heightIn: clientNumerics.heightIn, weightLbs: clientNumerics.weightLbs, statedClass }) },
-      { field: "a1c", ...crossCheckA1C({ carrier, a1c: clientNumerics.a1c, statedOutcome: statedClass }) },
+      { field: "build", ...crossCheckBuild({ carrier, heightIn: clientNumerics.heightIn, weightLbs: clientNumerics.weightLbs, statedClass, product }) },
+      { field: "a1c", ...crossCheckA1C({ carrier, a1c: clientNumerics.a1c, statedOutcome: statedClass, product }) },
       { field: "psa", ...crossCheckPSA({ carrier, psa: clientNumerics.psa, statedOutcome: statedClass }) },
     ];
 
