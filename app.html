@@ -710,7 +710,7 @@ function renderRecommendationControls(bubble, convId, recInfo, reviewState) {
   // (e.g. F&G has no build chart in any ingested document; none of the four
   // carriers use a numeric A1C/PSA threshold), never a fabricated pass.
   const dataGaps = recInfo.dataGaps || reviewState?.dataGaps || {};
-  const gapLabels = { build_chart_unavailable: "Build chart", a1c_unavailable: "Numeric A1C threshold", psa_unavailable: "Numeric PSA threshold" };
+  const gapLabels = { build_unavailable: "Build chart", a1c_unavailable: "Numeric A1C threshold", psa_unavailable: "Numeric PSA threshold" };
   const gapLines = Object.entries(dataGaps).flatMap(([carrierName, gaps]) =>
     (gaps || []).map((g) => `${gapLabels[g] || g} not available in ${carrierName}'s guidelines — not evaluated.`));
   if (gapLines.length) {
