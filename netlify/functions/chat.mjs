@@ -6,7 +6,7 @@ import {
   CORS, jsonError, requireUser, looksLikePdf, clientDocPrefix,
   loadConversation, saveConversation, logAccess, readAccessLog,
   CARRIERS, CARRIER_NAMES, SLOT_LABELS, saveRecommendation,
-  createClientProfile, addConversationToClientProfile,
+  createClientProfile, addConversationToClientProfile, getUserSettings,
 } from "./_shared.mjs";
 import { crossCheckBuild, crossCheckA1C, crossCheckPSA } from "./_lookup.mjs";
 import { computeGuidelineVersionHash, buildIntakeCacheKey, getCachedRecommendation, saveCachedRecommendation } from "./_cache.mjs";
@@ -304,8 +304,13 @@ function dedupeKey(carrier, m) {
   return `${carrier}|${m.slot_id || m.slot_label || ""}|${m.page_number}|${(m.content || "").slice(0, 80)}`;
 }
 
-async function carriersWithNarrativeGuidelines(supabase) {
-  const checks = await Promise.all(CARRIERS.map(async (carrier) => {
+// Scoped to licensedCarriers, not the full CARRIERS list (Phase 3) -- an
+// unlicensed carrier is excluded from the pipeline entirely, which means it
+// never even gets queried here, not just filtered out of the result
+// afterward. Defaults to the full CARRIERS list when licensedCarriers isn't
+// passed, so any other caller keeps its prior behavior unchanged.
+async function carriersWithNarrativeGuidelines(supabase, licensedCarriers = CARRIERS) {
+  const checks = await Promise.all(licensedCarriers.map(async (carrier) => {
     try {
       const { data } = await supabase.from("guideline_chunks").select("id").eq("carrier", carrier).limit(1);
       return (data?.length || 0) > 0 ? carrier : null;
@@ -477,6 +482,22 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
   let record = await loadConversation(convStore, userId, conversationId);
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);
 
+  // Licensed-carrier gate (Phase 3): computed fresh on every request, not
+  // cached anywhere across requests, so a settings change takes effect on
+  // the agent's very next message -- no re-login, no redeploy. Unset/missing
+  // settings (agent hasn't completed onboarding yet, or an API caller that
+  // bypasses the frontend) fails OPEN to all four carriers rather than
+  // silently zeroing every carrier out -- the onboarding modal that gives
+  // this real teeth is a frontend gate on top of this, not enforced here.
+  // Once an agent has explicitly saved a licensedCarriers list, it's a hard
+  // exclusion from here on: unlicensed carriers never enter `available`
+  // below, are never queried for narrative guidance, and never reach triage
+  // -- not just filtered out of what's displayed afterward.
+  const userSettings = await getUserSettings(userId).catch(() => null);
+  const licensedCarriers = (userSettings?.licensedCarriers && userSettings.licensedCarriers.length)
+    ? CARRIERS.filter((c) => userSettings.licensedCarriers.includes(c))
+    : CARRIERS.slice();
+
   let contentBlocks, tableStatus, narrativeStatus, mergedStatus, messages, selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord;
   let cacheKey = null;
   let intakeForDebug = null;
@@ -510,12 +531,12 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
       const intake = await extractClientIntake(anthropic, message);
       intakeForDebug = intake; // surfaced via debug:true only, for diagnosing cache-key instability
       const versionHash = await computeGuidelineVersionHash(supabase);
-      cacheKey = buildIntakeCacheKey(intake, versionHash);
+      cacheKey = buildIntakeCacheKey(intake, versionHash, licensedCarriers);
       const cached = await getCachedRecommendation(cacheKey);
       if (cached) {
         return {
           record: record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [] },
-          isFollowUp: false, cacheHit: true, cacheKey, intakeForDebug,
+          isFollowUp: false, cacheHit: true, cacheKey, intakeForDebug, licensedCarriers,
           cachedReplyText: cached.replyText,
           cachedRecommendation: cached.recommendation || null,
           tableStatus: cached.tableStatus || {}, narrativeStatus: cached.narrativeStatus || {},
@@ -542,6 +563,16 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
     tableStatus = {};
     const available = {};
     for (const carrier of CARRIERS) {
+      // Unlicensed carriers are excluded here, at the point `available` is
+      // built and BEFORE triage ever sees them -- not filtered out of triage's
+      // output afterward. tableStatus stays "none" for them regardless of
+      // whether documents are actually uploaded, same as "nothing uploaded"
+      // looks from the UI's perspective -- this carrier simply isn't part of
+      // this agent's pipeline.
+      if (!licensedCarriers.includes(carrier)) {
+        tableStatus[carrier] = "none";
+        continue;
+      }
       const slotKeys = allKeys.filter((k) => k.startsWith(`${carrier}_`));
       if (slotKeys.length === 0) {
         tableStatus[carrier] = "none";
@@ -609,7 +640,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
     let allChunks = [];
     if (supabase && openai) {
       try {
-        const guidedCarriers = await carriersWithNarrativeGuidelines(supabase);
+        const guidedCarriers = await carriersWithNarrativeGuidelines(supabase, licensedCarriers);
         allChunks = await researchNarrativeGuidance(anthropic, openai, supabase, message, guidedCarriers);
         const { contentBlocks: narrativeBlocks, narrativeStatus: nStatus } = formatNarrativeBlocks(allChunks, guidedCarriers);
         narrativeStatus = nStatus;
@@ -643,7 +674,10 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
     let allChunks = priorChunks;
     if (supabase && openai) {
       try {
-        const guidedCarriers = await carriersWithNarrativeGuidelines(supabase);
+        // Re-applied on every follow-up too, not just the conversation's
+        // first turn -- if the agent's licensing changed mid-conversation,
+        // the very next message (follow-up or not) reflects it.
+        const guidedCarriers = await carriersWithNarrativeGuidelines(supabase, licensedCarriers);
         const researchQuery = `${record.profileText}\n\nNEW INFORMATION FROM A FOLLOW-UP MESSAGE: ${message}`;
         const found = await researchNarrativeGuidance(anthropic, openai, supabase, researchQuery, guidedCarriers);
         const newChunks = found.filter((m) => !priorKeys.has(dedupeKey(m.carrier, m)));
@@ -693,7 +727,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
 
   return {
     record, isFollowUp, cacheHit: false, cacheKey, intakeForDebug, tableStatus, narrativeStatus, mergedStatus, messages,
-    selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord,
+    selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord, licensedCarriers,
   };
 }
 
@@ -944,6 +978,8 @@ export default async function handler(req) {
       // hashed to, so two calls on identical text can be compared directly
       // to see exactly which field (if any) diverged.
       cacheHit: !!ctx.cacheHit, cacheKey: ctx.cacheKey ?? null, intake: ctx.intakeForDebug ?? null,
+      // Phase 3: the licensed-carrier set actually applied to this request.
+      licensedCarriers: ctx.licensedCarriers ?? null,
     }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 

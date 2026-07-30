@@ -70,6 +70,30 @@ export const SLOT_LABELS = {
   },
 };
 
+// Per-agent settings, one record per userId (no nesting -- unlike
+// conversations/client-profiles, there's exactly one of these per agent, so
+// the userId itself is the key). Phase 3's only field today is
+// licensedCarriers, but this is the general home for future per-agent
+// preferences rather than a licensing-specific store.
+export async function getUserSettings(userId) {
+  const store = getStore({ name: "user-settings", consistency: "strong" });
+  try {
+    const text = await store.get(userId, { type: "text" });
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveUserSettings(userId, patch) {
+  const store = getStore({ name: "user-settings", consistency: "strong" });
+  const existing = (await getUserSettings(userId)) || { userId, createdAt: new Date().toISOString() };
+  const now = new Date().toISOString();
+  const record = { ...existing, ...patch, userId, updatedAt: now };
+  await store.set(userId, JSON.stringify(record), { metadata: { userId, updatedAt: now } });
+  return record;
+}
+
 export function conversationKey(userId, conversationId) {
   return `${userId}/${conversationId}`;
 }

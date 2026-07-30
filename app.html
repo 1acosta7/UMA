@@ -297,6 +297,19 @@
     }
     .report-stat .n { font-size: 1.3rem; font-weight: 800; }
     .report-stat .l { font-size: .68rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin-top: .15rem; }
+    .onboard-modal { max-width: 420px; }
+    .carrier-opts { display: flex; flex-direction: column; gap: .5rem; margin-bottom: 1.35rem; }
+    .carrier-opt {
+      display: flex; align-items: center; gap: .65rem;
+      padding: .7rem .85rem; border-radius: 10px; border: 1px solid var(--border);
+      background: var(--bg); cursor: pointer; transition: all .15s;
+    }
+    .carrier-opt:hover { border-color: var(--border2); }
+    .carrier-opt input[type=checkbox] { width: 17px; height: 17px; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
+    .carrier-opt span { font-size: .9rem; font-weight: 600; }
+    .carrier-opt.disabled { opacity: .55; cursor: not-allowed; }
+    .pin-btn:disabled { background: var(--border2); color: var(--muted); cursor: not-allowed; }
+    .pin-btn:disabled:hover { background: var(--border2); }
     .report-pages {
       max-height: 240px; overflow-y: auto; border: 1px solid var(--border); border-radius: 10px;
       margin-bottom: 1.25rem;
@@ -359,6 +372,16 @@
     <div class="report-pages" id="report-pages"></div>
     <p class="pin-err" id="report-warning" style="display:none"></p>
     <button class="pin-btn" onclick="closeReport()">Got it</button>
+  </div>
+</div>
+
+<div class="overlay" id="onboarding-modal" style="display:none">
+  <div class="modal onboard-modal">
+    <h3><i class="ti ti-license"></i> Which carriers are you licensed with?</h3>
+    <p>Uma only ever considers carriers you're licensed to sell. Select at least one to continue -- you can add more anytime from Setup.</p>
+    <div class="carrier-opts" id="onboarding-carriers"></div>
+    <p class="pin-err" id="onboarding-err">Select at least one carrier.</p>
+    <button class="pin-btn" id="onboard-continue-btn" onclick="submitOnboarding()" disabled><i class="ti ti-check"></i> Continue</button>
   </div>
 </div>
 
@@ -433,6 +456,15 @@
 
         <div class="setup-hd" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
           <div>
+            <h2>Licensed Carriers</h2>
+            <p>Only carriers checked here are ever considered for your recommendations -- unchecked carriers are excluded from retrieval entirely, not just hidden. Changes apply to your very next request, no re-login needed.</p>
+          </div>
+        </div>
+        <div class="carrier-opts" id="licensed-carriers-editor" style="max-width:420px"></div>
+        <button class="sbtn" onclick="saveLicensedCarriers()"><i class="ti ti-device-floppy"></i> Save licensed carriers</button>
+
+        <div class="setup-hd" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
+          <div>
             <h2>Client Profiles</h2>
             <p>One-time migration: existing conversations predate client profiles. Preview first -- it reports counts without changing anything -- then run for real.</p>
           </div>
@@ -490,14 +522,106 @@ window.addEventListener('load', async function() {
   initApp(window.Clerk);
 });
 
+let licensedCarriers = [];
+
 function initApp(clerk) {
   _clerk = clerk;
   const first = clerk.user.firstName || clerk.user.emailAddresses?.[0]?.emailAddress?.split('@')[0] || 'Agent';
   document.getElementById('user-name').textContent = first;
   document.getElementById('avatar').textContent = first[0].toUpperCase();
   document.getElementById('auth-screen').style.display = 'none';
+  checkOnboarding();
+}
+
+// Phase 3: first-login gate. licensedCarriers === null means the agent has
+// never saved a licensing selection -- show the blocking onboarding modal
+// instead of the app shell. If the settings fetch itself fails, fail open to
+// showing the app (chat.mjs's own server-side fallback is "all four
+// carriers" in that same failure case, so this doesn't create a mismatch --
+// it just means onboarding gets deferred to next load instead of hard-
+// blocking the agent from working at all).
+async function checkOnboarding() {
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/get-user-settings', { headers: { 'Authorization': `Bearer ${tk}` } });
+    if (res.status === 401) { await doSignOut(); return; }
+    const j = await res.json();
+    if (!j.licensedCarriers || !j.licensedCarriers.length) {
+      showOnboarding();
+      return;
+    }
+    licensedCarriers = j.licensedCarriers;
+  } catch { /* fail open -- see comment above */ }
   document.getElementById('app').style.display = 'flex';
   refreshConvList();
+}
+
+function carrierOptsHtml(idPrefix, checkedList) {
+  return Object.entries(CARRIERS).map(([id, c]) => `
+    <label class="carrier-opt" for="${idPrefix}-${id}">
+      <input type="checkbox" id="${idPrefix}-${id}" value="${id}" ${checkedList.includes(id) ? 'checked' : ''} onchange="${idPrefix === 'onboard' ? 'updateOnboardContinue()' : ''}">
+      <span style="color:${c.color}">${esc(c.name)}</span>
+    </label>`).join('');
+}
+
+function showOnboarding() {
+  document.getElementById('onboarding-carriers').innerHTML = carrierOptsHtml('onboard', []);
+  document.getElementById('onboarding-modal').style.display = 'flex';
+}
+
+function updateOnboardContinue() {
+  const checked = document.querySelectorAll('#onboarding-carriers input:checked');
+  document.getElementById('onboard-continue-btn').disabled = checked.length === 0;
+  document.getElementById('onboarding-err').style.display = 'none';
+}
+
+async function submitOnboarding() {
+  const checked = Array.from(document.querySelectorAll('#onboarding-carriers input:checked')).map(i => i.value);
+  if (!checked.length) { document.getElementById('onboarding-err').style.display = 'block'; return; }
+  const btn = document.getElementById('onboard-continue-btn');
+  btn.disabled = true; btn.innerHTML = '<div class="spin" style="width:14px;height:14px;display:inline-block"></div> Saving…';
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/save-user-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
+      body: JSON.stringify({ licensedCarriers: checked }),
+    });
+    if (res.status === 401) { await doSignOut(); return; }
+    const j = await res.json();
+    licensedCarriers = j.licensedCarriers || checked;
+    document.getElementById('onboarding-modal').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
+    refreshConvList();
+  } catch {
+    toast('Could not save -- try again', 'err');
+    btn.disabled = false; btn.innerHTML = '<i class="ti ti-check"></i> Continue';
+  }
+}
+
+// Setup-tab editor -- same endpoint as onboarding, same immediate effect:
+// chat.mjs reads licensedCarriers fresh from the store on every request, so
+// this takes effect on the agent's very next message, no re-login needed.
+function renderLicensedCarriersEditor() {
+  const wrap = document.getElementById('licensed-carriers-editor');
+  if (wrap) wrap.innerHTML = carrierOptsHtml('settings', licensedCarriers);
+}
+
+async function saveLicensedCarriers() {
+  const checked = Array.from(document.querySelectorAll('#licensed-carriers-editor input:checked')).map(i => i.value);
+  if (!checked.length) { toast('Select at least one carrier', 'err'); return; }
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/save-user-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
+      body: JSON.stringify({ licensedCarriers: checked }),
+    });
+    if (res.status === 401) { await doSignOut(); return; }
+    const j = await res.json();
+    licensedCarriers = j.licensedCarriers || checked;
+    toast('Licensed carriers updated', 'ok');
+  } catch { toast('Could not save -- try again', 'err'); }
 }
 
 async function token() { return await _clerk?.session?.getToken(); }
@@ -508,7 +632,10 @@ function switchTab(t) {
     document.getElementById("tab-"+x).classList.toggle("active", x===t);
     document.getElementById("panel-"+x).classList.toggle("active", x===t);
   });
-  if (t === "setup") { pin ? loadDocs() : showPin(); }
+  if (t === "setup") {
+    renderLicensedCarriersEditor(); // no PIN needed -- this is the agent's own licensing, not admin document management
+    pin ? loadDocs() : showPin();
+  }
 }
 
 function resize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,150)+'px'; }

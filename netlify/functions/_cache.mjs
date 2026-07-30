@@ -12,12 +12,19 @@ import crypto from "node:crypto";
 // deterministically returns the identical prior answer instead of re-running
 // a pipeline that's allowed to vary internally.
 //
-// Global, not per-agent: two different agents submitting the literal same
-// client facts should get the literal same underwriting answer -- that's a
-// correctness property of the guidelines, not something that should differ
-// by who's asking. Cached entries contain only structured medical/financial
-// facts and the resulting recommendation text, nothing about which agent or
-// client submitted it.
+// Global, not per-agent -- EXCEPT for licensed-carrier scope (Phase 3): two
+// agents with the SAME licensed carriers submitting the literal same client
+// facts should get the literal same underwriting answer, that's still a
+// correctness property of the guidelines. But an agent licensed for only 2
+// of the 4 carriers must never be served a cached answer that was generated
+// (and may have won) on a carrier they can't actually sell -- the recommended
+// carrier is part of what's "correct" here, and that now genuinely depends
+// on who's asking. licensedCarriers is folded into the cache key below for
+// exactly this reason: different licensing scopes never collide on the same
+// entry, even for byte-identical client facts. Cached entries otherwise still
+// contain only structured medical/financial facts and the resulting
+// recommendation text, nothing about which specific agent or client
+// submitted it.
 
 // One combined hash over every carrier's ingestion state, not a hash per
 // carrier -- a recommendation compares across all four carriers together,
@@ -117,7 +124,7 @@ function normDiagnoses(rawArr) {
 // collide. Missing fields are represented as null (not omitted), so "field
 // present but empty" and "field never asked about" can't accidentally hash
 // the same.
-export function buildIntakeCacheKey(intake, versionHash) {
+export function buildIntakeCacheKey(intake, versionHash, licensedCarriers) {
   const norm = normText;
   const normList = (arr) => coerceToArray(arr).map(norm).filter(Boolean).sort();
 
@@ -134,6 +141,8 @@ export function buildIntakeCacheKey(intake, versionHash) {
     coverageAmount: intake?.coverageAmount ?? null,
     productObjective: norm(intake?.productObjective) ?? null,
     guidelineVersionHash: versionHash,
+    // Sorted so licensing order never matters, only the actual set does.
+    licensedCarriers: [...new Set(licensedCarriers || [])].sort(),
   });
   return crypto.createHash("sha256").update(canonical).digest("hex");
 }
