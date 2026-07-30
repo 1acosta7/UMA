@@ -662,7 +662,7 @@ async function extractStructuredRecommendation(anthropic, { profileText, replyTe
   // vanish with no record and no signal. The caller now handles the two
   // cases differently: see the fallback record in the handler below.
   const resp = await anthropic.messages.create({
-    model: "claude-haiku-4-5-TEMP-BROKEN-FOR-TEST",
+    model: "claude-haiku-4-5",
     max_tokens: 3000,
     system: EXTRACT_SYSTEM,
     tools: [EXTRACT_TOOL],
