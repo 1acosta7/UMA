@@ -65,6 +65,28 @@ function normText(s) {
     .replace(/^(a|an|the)\s+/, "");
 }
 
+// Despite a schema declaring `type: "array"`, the extraction call has
+// occasionally returned a JSON-stringified array for a nested field instead
+// of an actual array (a tool-call serialization quirk on complex nested
+// structures under this model, not a wording/paraphrasing issue -- caught
+// live via the debug-mode intake diff while verifying the wording fix
+// below). Two identical inputs producing "real array" vs "array serialized
+// as a string" would otherwise hash differently even with identical
+// content. Parse-if-string before anything else so this can never be a
+// source of a spurious cache miss.
+function coerceToArray(v) {
+  if (Array.isArray(v)) return v;
+  if (typeof v === "string") {
+    try {
+      const parsed = JSON.parse(v);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 // diagnoses now come as {condition, modifiers} objects (see INTAKE_TOOL) so
 // the qualifying detail that varied most between runs -- "no neuropathy",
 // "on insulin", severity, control status -- is captured as short atomic
@@ -75,13 +97,13 @@ function normText(s) {
 // model happened to list things in. Still accepts a plain string per entry
 // (treated as {condition: string, modifiers: []}) for robustness against an
 // older-shaped extraction result.
-function normDiagnoses(arr) {
-  if (!Array.isArray(arr)) return [];
+function normDiagnoses(rawArr) {
+  const arr = coerceToArray(rawArr);
   return arr
     .map((d) => {
       if (typeof d === "string") return { condition: normText(d), modifiers: [] };
       const condition = normText(d?.condition);
-      const modifiers = Array.isArray(d?.modifiers) ? [...d.modifiers].map(normText).filter(Boolean).sort() : [];
+      const modifiers = coerceToArray(d?.modifiers).map(normText).filter(Boolean).sort();
       return { condition, modifiers };
     })
     .filter((d) => d.condition)
@@ -97,7 +119,7 @@ function normDiagnoses(arr) {
 // the same.
 export function buildIntakeCacheKey(intake, versionHash) {
   const norm = normText;
-  const normList = (arr) => (Array.isArray(arr) ? [...arr].map(norm).filter(Boolean).sort() : []);
+  const normList = (arr) => coerceToArray(arr).map(norm).filter(Boolean).sort();
 
   // Fixed key order -- this IS the canonicalization, no generic object-key
   // sorter needed since every field is spelled out explicitly here.
