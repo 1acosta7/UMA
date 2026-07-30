@@ -8,6 +8,7 @@ import {
   CARRIERS, CARRIER_NAMES, SLOT_LABELS, saveRecommendation,
 } from "./_shared.mjs";
 import { crossCheckBuild, crossCheckA1C, crossCheckPSA } from "./_lookup.mjs";
+import { computeGuidelineVersionHash, buildIntakeCacheKey, getCachedRecommendation, saveCachedRecommendation } from "./_cache.mjs";
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
 
@@ -113,6 +114,49 @@ Determine:
 
 Return JSON only:
 {"bindingConstraint": "...", "caseType": "...", "carriers": {"<carrier_id>": {"docs": ["slotId1","slotId2"], "tier": "full"|"narrative_only"}}}`;
+
+// Runs BEFORE triage/research/final-analysis, purely to build the cache key
+// (see _cache.mjs) -- a much simpler, more mechanical task than the
+// underwriting reasoning it's gating, so it carries far less of the run-to-
+// run variance risk than what it's replacing. A pure extraction task, not a
+// judgment call: never infer or normalize a value that isn't explicitly
+// stated (age band, rough weight, etc. -- if it's not exact, leave it null).
+// If this extraction itself varies between two runs of literally identical
+// text, the worst case is a cache MISS (falls back to running the full
+// pipeline normally), never a wrong hit -- see buildIntakeCacheKey.
+const INTAKE_SYSTEM = `You are extracting structured intake fields from a life insurance case description, for exact-match cache-key purposes only -- this is not an underwriting judgment. Extract ONLY values explicitly and exactly stated. Never infer, estimate, round, or normalize (e.g. do not turn "mid-60s" into a specific age, do not convert an approximate weight into a number) -- if a field isn't stated as an exact value, leave it out entirely. Call record_client_intake exactly once.`;
+
+const INTAKE_TOOL = {
+  name: "record_client_intake",
+  description: "Record the structured client intake fields explicitly and exactly stated in the case description.",
+  input_schema: {
+    type: "object",
+    properties: {
+      age: { type: "number" },
+      sex: { type: "string", enum: ["male", "female"] },
+      heightIn: { type: "number", description: "Total height in inches, only if an exact height is stated (convert feet/inches to total inches)." },
+      weightLbs: { type: "number" },
+      tobacco: { type: "string", enum: ["yes", "no"], description: "Only if tobacco/nicotine use is explicitly addressed either way." },
+      medications: { type: "array", items: { type: "string" } },
+      diagnoses: { type: "array", items: { type: "string" } },
+      coverageAmount: { type: "number" },
+      productObjective: { type: "string", description: "e.g. 'final expense', 'term', 'whole life', 'IUL' -- only if explicitly stated." },
+    },
+  },
+};
+
+async function extractClientIntake(anthropic, message) {
+  const resp = await anthropic.messages.create({
+    model: "claude-haiku-4-5",
+    max_tokens: 1000,
+    system: INTAKE_SYSTEM,
+    tools: [INTAKE_TOOL],
+    tool_choice: { type: "tool", name: "record_client_intake" },
+    messages: [{ role: "user", content: message }],
+  });
+  const toolUse = resp.content.find((b) => b.type === "tool_use" && b.name === "record_client_intake");
+  return toolUse?.input || {};
+}
 
 function deriveLabel(profileText, replyText) {
   const m = replyText.match(/-\s*Name \(or initials\):\s*(.+)/i);
@@ -391,8 +435,58 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);
 
   let contentBlocks, tableStatus, narrativeStatus, mergedStatus, messages, selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord;
+  let cacheKey = null;
 
   if (!isFollowUp) {
+    // ---- Consistency cache: check BEFORE triage/research/final-analysis ----
+    // The whole point is to skip the pipeline stage that actually varies
+    // (research's improvised search count/order, which changes what the
+    // final model sees), not just cache its output after the fact. Scoped
+    // to initial analysis only, not follow-ups -- a follow-up is contextual
+    // conversation on an already-established thread, not a fresh case
+    // lookup, so "identical input -> identical output" doesn't apply the
+    // same way there.
+    //
+    // Attached client documents (uploaded via upload-client-doc.mjs before
+    // analysis ever runs) are NOT represented in the structured-intake cache
+    // key at all -- the key is built from the free-text profile's stated
+    // fields only. Two conversations with identical intake text but
+    // different attached PDFs could otherwise silently collide on the same
+    // cache entry and ignore whatever's in the attachment. Conservative fix:
+    // any attached client document forces a cache miss for this
+    // conversation, every time, rather than risk that.
+    let hasClientDocs = false;
+    try {
+      const { blobs } = await clientStore.list({ prefix: clientDocPrefix(userId, conversationId) });
+      hasClientDocs = (blobs?.length || 0) > 0;
+    } catch { /* treat as no client docs if the check itself fails */ }
+
+    try {
+      if (hasClientDocs) throw new Error("client documents attached -- skip cache");
+      const intake = await extractClientIntake(anthropic, message);
+      const versionHash = await computeGuidelineVersionHash(supabase);
+      cacheKey = buildIntakeCacheKey(intake, versionHash);
+      const cached = await getCachedRecommendation(cacheKey);
+      if (cached) {
+        return {
+          record: record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [] },
+          isFollowUp: false, cacheHit: true, cacheKey,
+          cachedReplyText: cached.replyText,
+          cachedRecommendation: cached.recommendation || null,
+          tableStatus: cached.tableStatus || {}, narrativeStatus: cached.narrativeStatus || {},
+          mergedStatus: cached.mergedStatus || {},
+          selectedForRecord: cached.carrierSelection || {}, tierForRecord: cached.tier || {},
+          clientDocKeysForRecord: [], narrativeChunksForRecord: cached.narrativeChunks || [],
+          messages: null,
+        };
+      }
+    } catch {
+      // Intake extraction or the cache lookup itself failing must never
+      // block the request -- just means this run can't be cached/served
+      // from cache, and falls through to running the pipeline normally.
+      cacheKey = null;
+    }
+
     // ---- Initial analysis: discover, triage, and load documents ----
     let allKeys = [];
     try {
@@ -553,7 +647,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
   }
 
   return {
-    record, isFollowUp, tableStatus, narrativeStatus, mergedStatus, messages,
+    record, isFollowUp, cacheHit: false, cacheKey, tableStatus, narrativeStatus, mergedStatus, messages,
     selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord,
   };
 }
@@ -681,24 +775,46 @@ async function extractStructuredRecommendation(anthropic, { profileText, replyTe
 // class the model cited and a small, source-grounded lookup table for
 // build/BMI (and A1C/PSA where any carrier's ingested documents actually use
 // a numeric cutoff for them -- currently none do, see _lookup.mjs).
+//
+// flaggedForReview stays scoped to the recommended carrier only -- that's
+// the one thing actually being submitted, so it's the one worth an urgent
+// discrepancy banner. dataGaps is separate and broader: run across every
+// carrier that appears in the resolution chain (not just the winner), and
+// only for genuine carrier-side gaps (reasonType "no_carrier_data" -- see
+// _lookup.mjs) never for the client simply not having provided a value.
+// This is what makes "not evaluated" visibly different from "evaluated and
+// passed" instead of both looking like silence.
 function runNumericCrossCheck(structured) {
-  if (!structured?.hasRecommendation || !structured.recommendedCarrier) return { flagged: false, checks: [] };
-  const { recommendedCarrier: carrier, rateClass, clientNumerics = {} } = structured;
+  if (!structured?.hasRecommendation) return { flagged: false, checks: [], dataGaps: {} };
+  const { recommendedCarrier, rateClass, clientNumerics = {}, chain = [] } = structured;
 
-  const buildCheck = crossCheckBuild({ carrier, heightIn: clientNumerics.heightIn, weightLbs: clientNumerics.weightLbs, statedClass: rateClass });
-  const a1cCheck = crossCheckA1C({ carrier, a1c: clientNumerics.a1c, statedOutcome: rateClass });
-  const psaCheck = crossCheckPSA({ carrier, psa: clientNumerics.psa, statedOutcome: rateClass });
+  const carriersToCheck = new Set([recommendedCarrier, ...chain.map((c) => c.carrier)].filter(Boolean));
+  const dataGaps = {};
+  let winningChecks = [];
 
-  const checks = [
-    { field: "build", ...buildCheck },
-    { field: "a1c", ...a1cCheck },
-    { field: "psa", ...psaCheck },
-  ];
-  const disagreement = checks.find((c) => c.checked && c.agrees === false);
+  for (const carrier of carriersToCheck) {
+    const statedClass = carrier === recommendedCarrier
+      ? rateClass
+      : chain.find((c) => c.carrier === carrier)?.carrierConclusion;
+
+    const checks = [
+      { field: "build", ...crossCheckBuild({ carrier, heightIn: clientNumerics.heightIn, weightLbs: clientNumerics.weightLbs, statedClass }) },
+      { field: "a1c", ...crossCheckA1C({ carrier, a1c: clientNumerics.a1c, statedOutcome: statedClass }) },
+      { field: "psa", ...crossCheckPSA({ carrier, psa: clientNumerics.psa, statedOutcome: statedClass }) },
+    ];
+
+    const gaps = checks.filter((c) => !c.checked && c.reasonType === "no_carrier_data").map((c) => `${c.field}_unavailable`);
+    if (gaps.length) dataGaps[CARRIER_NAMES[carrier] || carrier] = gaps;
+
+    if (carrier === recommendedCarrier) winningChecks = checks;
+  }
+
+  const disagreement = winningChecks.find((c) => c.checked && c.agrees === false);
   return {
     flagged: !!disagreement,
     flagReason: disagreement ? `Numeric cross-check disagreement on ${disagreement.field}: ${disagreement.detail}` : null,
-    checks,
+    checks: winningChecks,
+    dataGaps,
   };
 }
 
@@ -771,56 +887,81 @@ export default async function handler(req) {
         return;
       }
       const {
-        record, isFollowUp, tableStatus, narrativeStatus, mergedStatus, messages,
+        record, isFollowUp, cacheHit, cacheKey, cachedReplyText, cachedRecommendation,
+        tableStatus, narrativeStatus, mergedStatus, messages,
         selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord,
       } = ctx;
 
       if (!isFollowUp) controller.enqueue(sse("meta", { carrierStatus: mergedStatus }));
       let replyText = "";
-      try {
-        // Thinking disabled: Netlify's function timeout leaves no room for
-        // adaptive thinking's invisible reasoning phase on top of native PDF
-        // processing -- see chat.mjs history for the earlier 60s timeout fix.
-        // NOTE: `temperature` is deprecated/rejected outright by claude-sonnet-5
-        // (confirmed via a live 400 "temperature is deprecated for this model")
-        // -- there is currently no sampling-temperature knob for this model, so
-        // determinism instead relies on thinking being disabled and the
-        // documents/system prompt being the same on every call for a given
-        // client, not an explicit temperature setting.
-        const anthropicStream = anthropic.messages.stream({
-          model: "claude-sonnet-5",
-          max_tokens: 8000,
-          thinking: { type: "disabled" },
-          system: SYSTEM_PROMPT,
-          messages,
-        });
-        for await (const event of anthropicStream) {
-          if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-            replyText += event.delta.text;
-            controller.enqueue(sse("delta", { text: event.delta.text }));
-          }
-        }
-        // The stream can complete "successfully" (no thrown error) yet still
-        // carry zero text -- e.g. stop_reason "refusal"/"max_tokens" with no
-        // text block ever opened. Silently closing here used to surface as
-        // an opaque "No analysis was returned" on the frontend with nothing
-        // to debug from. Surface the actual stop_reason instead.
+
+      if (cacheHit) {
+        // Consistency cache hit: identical structured client intake AND an
+        // identical guideline-version hash as a prior run. Replay the exact
+        // same answer instead of re-running triage/research/final-analysis
+        // (the stage that actually varies run to run) -- this is the whole
+        // point, not just caching the output after the fact.
+        replyText = cachedReplyText || "";
         if (!replyText) {
-          let stopReason = "unknown";
-          try {
-            const final = await anthropicStream.finalMessage();
-            stopReason = final?.stop_reason || stopReason;
-          } catch { /* finalMessage best-effort only */ }
           stopHeartbeat();
-          controller.enqueue(sse("error", { error: `Model returned no text (stop_reason: ${stopReason}). Try again or narrow the client profile.` }));
+          controller.enqueue(sse("error", { error: "Cached entry had no answer text. Try again." }));
           controller.close();
           return;
         }
-      } catch (err) {
-        stopHeartbeat();
-        controller.enqueue(sse("error", { error: err.message }));
-        controller.close();
-        return;
+        const CHUNK = 200;
+        for (let i = 0; i < replyText.length; i += CHUNK) {
+          controller.enqueue(sse("delta", { text: replyText.slice(i, i + CHUNK) }));
+        }
+      } else {
+        try {
+          // Thinking disabled: Netlify's function timeout leaves no room for
+          // adaptive thinking's invisible reasoning phase on top of native PDF
+          // processing -- see chat.mjs history for the earlier 60s timeout fix.
+          // NOTE: `temperature` is deprecated/rejected outright by claude-sonnet-5
+          // (confirmed via a live 400 "temperature is deprecated for this model")
+          // -- there is currently no sampling-temperature knob for this model, so
+          // determinism instead relies on thinking being disabled and the
+          // documents/system prompt being the same on every call for a given
+          // client, not an explicit temperature setting. Run-to-run variance
+          // this call and the research stage before it can still introduce is
+          // what the consistency cache above is for -- it doesn't make this
+          // call itself more deterministic, it just avoids re-running it (and
+          // everything before it) for input already seen once.
+          const anthropicStream = anthropic.messages.stream({
+            model: "claude-sonnet-5",
+            max_tokens: 8000,
+            thinking: { type: "disabled" },
+            system: SYSTEM_PROMPT,
+            messages,
+          });
+          for await (const event of anthropicStream) {
+            if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
+              replyText += event.delta.text;
+              controller.enqueue(sse("delta", { text: event.delta.text }));
+            }
+          }
+          // The stream can complete "successfully" (no thrown error) yet still
+          // carry zero text -- e.g. stop_reason "refusal"/"max_tokens" with no
+          // text block ever opened. Silently closing here used to surface as
+          // an opaque "No analysis was returned" on the frontend with nothing
+          // to debug from. Surface the actual stop_reason instead.
+          if (!replyText) {
+            let stopReason = "unknown";
+            try {
+              const final = await anthropicStream.finalMessage();
+              stopReason = final?.stop_reason || stopReason;
+            } catch { /* finalMessage best-effort only */ }
+            stopHeartbeat();
+            controller.enqueue(sse("error", { error: `Model returned no text (stop_reason: ${stopReason}). Try again or narrow the client profile.` }));
+            controller.close();
+            return;
+          }
+        } catch (err) {
+          stopHeartbeat();
+          controller.enqueue(sse("error", { error: err.message }));
+          controller.close();
+          return;
+        }
       }
 
       const now = new Date().toISOString();
@@ -842,69 +983,121 @@ export default async function handler(req) {
       // fixed, even though the user's visible answer has already fully
       // streamed by this point.
       let recommendationInfo = null;
-      try {
-        const profileTextForExtraction = isFollowUp ? `${record.profileText}\n\nFollow-up: ${message}` : message;
 
-        // extractStructuredRecommendation now throws on a genuine failure
-        // (API exception, malformed/missing tool_use) instead of returning
-        // null for it -- null used to mean the exact same thing as a
-        // legitimate hasRecommendation:false answer (a clarifying question),
-        // so a real failure and "nothing to record" were indistinguishable
-        // and both vanished with no trace. Caught here, separately, so a
-        // real failure gets its own minimal fallback record and a flag the
-        // agent can actually see, instead of silently looking identical to
-        // a normal turn that just didn't need a recommendation.
-        let structured;
-        try {
-          structured = await extractStructuredRecommendation(anthropic, {
-            profileText: profileTextForExtraction, replyText, narrativeChunks: narrativeChunksForRecord,
-          });
-        } catch (extractErr) {
-          await logAccess(userId, conversationId, "recommendation_extraction_failed");
-          const saved = await saveRecommendation({
-            userId, conversationId, timestamp: now, status: "extraction_failed",
-            errorMessage: extractErr.message, rawAnswerText: replyText,
-          });
-          recommendationInfo = { key: saved.key, recordSaved: false, status: "extraction_failed" };
-          structured = null;
+      if (cacheHit) {
+        // Copy the cached structured record forward as THIS conversation's
+        // own recommendation entry -- every conversation still gets its own
+        // audit-trail record (per-conversation immutability is unaffected),
+        // it just doesn't re-run extraction/cross-check, since by definition
+        // of a cache hit the inputs (and therefore the correct output) are
+        // identical to the run that produced the cached entry.
+        if (cachedRecommendation) {
+          try {
+            const saved = await saveRecommendation({
+              ...cachedRecommendation,
+              userId, conversationId, timestamp: now, status: "ok", servedFromCache: true, cacheKey,
+              agentReviewed: false, agentAgreed: null,
+            });
+            recommendationInfo = {
+              key: saved.key, flaggedForReview: saved.flaggedForReview, flagReason: saved.flagReason,
+              recordSaved: true, status: "ok", servedFromCache: true,
+              dataGaps: saved.dataGaps || {},
+            };
+          } catch { /* best-effort -- the cached reply already reached the agent */ }
         }
+      } else {
+        let structured = null;
+        try {
+          const profileTextForExtraction = isFollowUp ? `${record.profileText}\n\nFollow-up: ${message}` : message;
 
-        if (structured?.hasRecommendation) {
-          const crossCheck = runNumericCrossCheck(structured);
-          const saved = await saveRecommendation({
-            userId, conversationId, timestamp: now, status: "ok",
-            recommendedCarrier: structured.recommendedCarrier || null,
-            recommendedProduct: structured.recommendedProduct || null,
-            rateClass: structured.rateClass || null,
-            confidence: structured.confidence || null,
-            sourceDocId: structured.sourceDocId || null,
-            sourcePage: structured.sourcePage ?? null,
-            ruleQuote: structured.ruleQuote || null,
-            bindingConstraint: structured.bindingConstraint || null,
-            clientNumerics: structured.clientNumerics || {},
-            chain: structured.chain || [],
-            flaggedForReview: crossCheck.flagged,
-            flagReason: crossCheck.flagReason,
-            numericChecks: crossCheck.checks,
-            agentReviewed: false,
-            agentAgreed: null,
-          });
-          recommendationInfo = { key: saved.key, flaggedForReview: saved.flaggedForReview, flagReason: saved.flagReason, recordSaved: true, status: "ok" };
+          // extractStructuredRecommendation now throws on a genuine failure
+          // (API exception, malformed/missing tool_use) instead of returning
+          // null for it -- null used to mean the exact same thing as a
+          // legitimate hasRecommendation:false answer (a clarifying question),
+          // so a real failure and "nothing to record" were indistinguishable
+          // and both vanished with no trace. Caught here, separately, so a
+          // real failure gets its own minimal fallback record and a flag the
+          // agent can actually see, instead of silently looking identical to
+          // a normal turn that just didn't need a recommendation.
+          try {
+            structured = await extractStructuredRecommendation(anthropic, {
+              profileText: profileTextForExtraction, replyText, narrativeChunks: narrativeChunksForRecord,
+            });
+          } catch (extractErr) {
+            await logAccess(userId, conversationId, "recommendation_extraction_failed");
+            const saved = await saveRecommendation({
+              userId, conversationId, timestamp: now, status: "extraction_failed",
+              errorMessage: extractErr.message, rawAnswerText: replyText,
+            });
+            recommendationInfo = { key: saved.key, recordSaved: false, status: "extraction_failed" };
+            structured = null;
+          }
+
+          if (structured?.hasRecommendation) {
+            const crossCheck = runNumericCrossCheck(structured);
+            const recordFields = {
+              recommendedCarrier: structured.recommendedCarrier || null,
+              recommendedProduct: structured.recommendedProduct || null,
+              rateClass: structured.rateClass || null,
+              confidence: structured.confidence || null,
+              sourceDocId: structured.sourceDocId || null,
+              sourcePage: structured.sourcePage ?? null,
+              ruleQuote: structured.ruleQuote || null,
+              bindingConstraint: structured.bindingConstraint || null,
+              clientNumerics: structured.clientNumerics || {},
+              chain: structured.chain || [],
+              flaggedForReview: crossCheck.flagged,
+              flagReason: crossCheck.flagReason,
+              numericChecks: crossCheck.checks,
+              dataGaps: crossCheck.dataGaps || {},
+            };
+            const saved = await saveRecommendation({
+              userId, conversationId, timestamp: now, status: "ok",
+              ...recordFields, agentReviewed: false, agentAgreed: null,
+            });
+            recommendationInfo = {
+              key: saved.key, flaggedForReview: saved.flaggedForReview, flagReason: saved.flagReason,
+              recordSaved: true, status: "ok", dataGaps: saved.dataGaps || {},
+            };
+
+            // Populate the consistency cache -- only on a clean, successfully
+            // extracted result, and only if intake extraction earlier
+            // succeeded enough to produce a cacheKey at all.
+            if (cacheKey) {
+              await saveCachedRecommendation(cacheKey, {
+                replyText, recommendation: recordFields,
+                tableStatus, narrativeStatus, mergedStatus,
+                carrierSelection: selectedForRecord, tier: tierForRecord,
+                narrativeChunks: narrativeChunksForRecord,
+              });
+            }
+          } else if (structured && cacheKey) {
+            // A legitimate no-recommendation answer (a clarifying question)
+            // is exactly the kind of output that should ALSO be consistent
+            // run to run -- cache the reply text even without a structured
+            // recommendation to go with it.
+            await saveCachedRecommendation(cacheKey, {
+              replyText, recommendation: null,
+              tableStatus, narrativeStatus, mergedStatus,
+              carrierSelection: selectedForRecord, tier: tierForRecord,
+              narrativeChunks: narrativeChunksForRecord,
+            });
+          }
+        } catch (pipelineErr) {
+          // A failure OUTSIDE extraction itself -- e.g. saveRecommendation's
+          // own Blobs write failing after a successful extraction. Rarer, but
+          // the same class of silent gap if swallowed, so it gets the same
+          // treatment: logged through the existing access-log mechanism, and
+          // a best-effort fallback record (raw answer text at minimum).
+          await logAccess(userId, conversationId, "recommendation_persist_failed");
+          try {
+            const saved = await saveRecommendation({
+              userId, conversationId, timestamp: now, status: "extraction_failed",
+              errorMessage: pipelineErr.message, rawAnswerText: replyText,
+            });
+            recommendationInfo = { key: saved.key, recordSaved: false, status: "extraction_failed" };
+          } catch { /* persistence itself is down -- the agent's reply still isn't blocked, but truly nothing more to log here */ }
         }
-      } catch (pipelineErr) {
-        // A failure OUTSIDE extraction itself -- e.g. saveRecommendation's
-        // own Blobs write failing after a successful extraction. Rarer, but
-        // the same class of silent gap if swallowed, so it gets the same
-        // treatment: logged through the existing access-log mechanism, and
-        // a best-effort fallback record (raw answer text at minimum).
-        await logAccess(userId, conversationId, "recommendation_persist_failed");
-        try {
-          const saved = await saveRecommendation({
-            userId, conversationId, timestamp: now, status: "extraction_failed",
-            errorMessage: pipelineErr.message, rawAnswerText: replyText,
-          });
-          recommendationInfo = { key: saved.key, recordSaved: false, status: "extraction_failed" };
-        } catch { /* persistence itself is down -- the agent's reply still isn't blocked, but truly nothing more to log here */ }
       }
 
       stopHeartbeat();

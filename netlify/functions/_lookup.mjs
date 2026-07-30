@@ -160,10 +160,14 @@ function classifyBMI(bands, bmi) {
 export function crossCheckBuild({ carrier, heightIn, weightLbs, statedClass }) {
   const entry = NUMERIC_LOOKUP[carrier]?.build;
   if (!entry?.available) {
-    return { checked: false, reason: entry?.note || "No build lookup data for this carrier." };
+    // A genuine carrier-side gap (no build chart exists for this carrier in
+    // the ingested documents) -- distinct from the client simply not having
+    // given height/weight, which is a client-data gap, not a carrier one.
+    // Only the former belongs in the agent-facing dataGaps note.
+    return { checked: false, reasonType: "no_carrier_data", reason: entry?.note || "No build lookup data for this carrier." };
   }
   if (heightIn == null || weightLbs == null) {
-    return { checked: false, reason: "Client height/weight not both available to check." };
+    return { checked: false, reasonType: "no_client_data", reason: "Client height/weight not both available to check." };
   }
 
   if (entry.kind === "bmi_bands") {
@@ -192,7 +196,7 @@ export function crossCheckBuild({ carrier, heightIn, weightLbs, statedClass }) {
         ];
     const result = classifyHeightWeight(entry.data, heightIn, weightLbs, classFields);
     if (!result) {
-      return { checked: false, reason: `Height ${heightIn}in not covered by the transcribed table range for this carrier.` };
+      return { checked: false, reasonType: "no_carrier_data", reason: `Height ${heightIn}in not covered by the transcribed table range for this carrier.` };
     }
     const agrees = statedClass ? String(statedClass).toLowerCase().includes(result.class.toLowerCase().split(" ")[0].split("/")[0]) : null;
     return {
@@ -202,17 +206,20 @@ export function crossCheckBuild({ carrier, heightIn, weightLbs, statedClass }) {
     };
   }
 
-  return { checked: false, reason: "Unrecognized lookup kind." };
+  return { checked: false, reasonType: "no_carrier_data", reason: "Unrecognized lookup kind." };
 }
 
+// Structurally unavailable for all four carriers, independent of whether the
+// client even provided an A1C/PSA value -- always a carrier-side gap, so
+// always reasonType "no_carrier_data" here.
 export function crossCheckA1C({ carrier, a1c, statedOutcome }) {
   const entry = NUMERIC_LOOKUP[carrier]?.a1c;
-  return { checked: false, reason: entry?.note || "No A1C lookup data for this carrier -- none of the four carriers currently use a numeric A1C cutoff in their ingested documents." };
+  return { checked: false, reasonType: "no_carrier_data", reason: entry?.note || "No A1C lookup data for this carrier -- none of the four carriers currently use a numeric A1C cutoff in their ingested documents." };
 }
 
 export function crossCheckPSA({ carrier, psa, statedOutcome }) {
   const entry = NUMERIC_LOOKUP[carrier]?.psa;
-  return { checked: false, reason: entry?.note || "No PSA lookup data for this carrier." };
+  return { checked: false, reasonType: "no_carrier_data", reason: entry?.note || "No PSA lookup data for this carrier." };
 }
 
 export { feetInchesToTotalInches, bmiFromHeightWeight };
