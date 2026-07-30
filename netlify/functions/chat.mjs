@@ -785,11 +785,11 @@ async function extractStructuredRecommendation(anthropic, { profileText, replyTe
 // This is what makes "not evaluated" visibly different from "evaluated and
 // passed" instead of both looking like silence.
 function runNumericCrossCheck(structured) {
-  if (!structured?.hasRecommendation) return { flagged: false, checks: [], dataGaps: {} };
+  if (!structured?.hasRecommendation) return { flagged: false, checks: [], dataGaps: { winner: null, others: [] } };
   const { recommendedCarrier, rateClass, clientNumerics = {}, chain = [] } = structured;
 
   const carriersToCheck = new Set([recommendedCarrier, ...chain.map((c) => c.carrier)].filter(Boolean));
-  const dataGaps = {};
+  const gapsByCarrierName = {};
   let winningChecks = [];
 
   for (const carrier of carriersToCheck) {
@@ -804,10 +804,27 @@ function runNumericCrossCheck(structured) {
     ];
 
     const gaps = checks.filter((c) => !c.checked && c.reasonType === "no_carrier_data").map((c) => `${c.field}_unavailable`);
-    if (gaps.length) dataGaps[CARRIER_NAMES[carrier] || carrier] = gaps;
+    if (gaps.length) gapsByCarrierName[CARRIER_NAMES[carrier] || carrier] = gaps;
 
     if (carrier === recommendedCarrier) winningChecks = checks;
   }
+
+  // Collapsed for display: only the winning carrier -- the one actually
+  // being submitted -- keeps its gaps itemized. Every other carrier's gaps
+  // are rolled up by gap type (e.g. one line covering "A1C and PSA also not
+  // evaluated for Foresters, Allianz, Transamerica" instead of six separate
+  // per-carrier-per-field lines). Same underlying facts, less noise.
+  const winnerName = CARRIER_NAMES[recommendedCarrier] || recommendedCarrier || null;
+  const winnerGaps = (winnerName && gapsByCarrierName[winnerName]) || [];
+  const othersByGapType = {};
+  for (const [carrierName, gaps] of Object.entries(gapsByCarrierName)) {
+    if (carrierName === winnerName) continue;
+    for (const gap of gaps) (othersByGapType[gap] ||= []).push(carrierName);
+  }
+  const dataGaps = {
+    winner: winnerName ? { carrier: winnerName, gaps: winnerGaps } : null,
+    others: Object.entries(othersByGapType).map(([gapType, carriers]) => ({ gapType, carriers })),
+  };
 
   const disagreement = winningChecks.find((c) => c.checked && c.agrees === false);
   return {
@@ -1061,9 +1078,15 @@ export default async function handler(req) {
             };
 
             // Populate the consistency cache -- only on a clean, successfully
-            // extracted result, and only if intake extraction earlier
-            // succeeded enough to produce a cacheKey at all.
-            if (cacheKey) {
+            // extracted result, only if intake extraction earlier succeeded
+            // enough to produce a cacheKey at all, AND only at High
+            // confidence. A cached wrong answer repeats indefinitely instead
+            // of being a one-off -- acceptable when the model itself is
+            // confident the guideline text resolves cleanly, not acceptable
+            // for a Medium/Low case where the model is already signaling
+            // some interpretation gap. Those always re-run the full pipeline,
+            // every time, even for the exact same input.
+            if (cacheKey && structured.confidence === "High") {
               await saveCachedRecommendation(cacheKey, {
                 replyText, recommendation: recordFields,
                 tableStatus, narrativeStatus, mergedStatus,
