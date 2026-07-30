@@ -2,6 +2,7 @@ import { getStore } from "@netlify/blobs";
 import {
   CORS, jsonError, requireUser, looksLikePdf,
   clientDocPrefix, loadConversation, saveConversation, logAccess,
+  addConversationToClientProfile,
 } from "./_shared.mjs";
 
 // Any signed-in agent may upload documents for their own client -- this is
@@ -18,7 +19,7 @@ export default async function handler(req) {
     return jsonError(401, "Unauthorized");
   }
 
-  const { conversationId, filename, data } = await req.json();
+  const { conversationId, filename, data, clientProfileId: incomingClientProfileId } = await req.json();
   if (!conversationId || !filename || !data) {
     return jsonError(400, "conversationId, filename, and data are required");
   }
@@ -31,24 +32,38 @@ export default async function handler(req) {
     return jsonError(400, "File does not appear to be a PDF");
   }
 
-  const docId = crypto.randomUUID();
-  const uploadedAt = new Date().toISOString();
-  const clientStore = getStore({ name: "client-docs", consistency: "strong" });
-  const key = `${clientDocPrefix(userId, conversationId)}${docId}`;
-  await clientStore.set(key, buf, { metadata: { userId, conversationId, filename, uploadedAt } });
-
   // Ensure a stub conversation record exists even if analysis hasn't run yet,
   // so the doc's conversationId has somewhere to belong. chat.mjs fills the
-  // rest in once analysis actually runs.
+  // rest in once analysis actually runs. If the agent picked an existing
+  // client before attaching a doc (client selected first, profile typed and
+  // sent second), register the conversation under that client now rather
+  // than waiting for chat.mjs to do it -- mirrors the same resolution chat.mjs
+  // uses, so whichever happens first (upload or analysis) leaves the client
+  // profile's conversationIds list correct either way.
+  const uploadedAt = new Date().toISOString();
   const convStore = getStore({ name: "conversations", consistency: "strong" });
   let record = await loadConversation(convStore, userId, conversationId);
   if (!record) {
     record = { id: conversationId, userId, createdAt: uploadedAt, turns: [] };
-    await saveConversation(convStore, userId, conversationId, record);
   }
+  if (!record.clientProfileId && incomingClientProfileId) {
+    try {
+      await addConversationToClientProfile(userId, incomingClientProfileId, conversationId);
+      record.clientProfileId = incomingClientProfileId;
+    } catch { /* invalid/foreign clientProfileId -- leave unset, chat.mjs will create one at analysis time */ }
+  }
+  await saveConversation(convStore, userId, conversationId, record);
+
+  const docId = crypto.randomUUID();
+  const clientStore = getStore({ name: "client-docs", consistency: "strong" });
+  const key = `${clientDocPrefix(userId, conversationId)}${docId}`;
+  await clientStore.set(key, buf, {
+    metadata: { userId, conversationId, clientProfileId: record.clientProfileId || null, filename, uploadedAt },
+  });
+
   await logAccess(userId, conversationId, "upload");
 
-  return new Response(JSON.stringify({ success: true, docId, key, filename, uploadedAt }), {
+  return new Response(JSON.stringify({ success: true, docId, key, filename, uploadedAt, clientProfileId: record.clientProfileId || null }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },
   });
 }

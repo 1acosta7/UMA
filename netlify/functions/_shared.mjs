@@ -74,6 +74,72 @@ export function conversationKey(userId, conversationId) {
   return `${userId}/${conversationId}`;
 }
 
+// A client profile is the durable identity across conversations -- "this
+// real person," independent of any single chat thread. A conversation
+// record still IS the actual placement-analysis thread (turns, retrieval
+// state, etc.); the profile just tracks which conversationIds belong to the
+// same client over time (an initial term quote, then an IUL follow-up
+// months later) so an agent can find them together instead of only ever
+// resuming one thread at a time.
+export function clientProfileKey(userId, clientProfileId) {
+  return `${userId}/${clientProfileId}`;
+}
+
+export async function createClientProfile(userId, label, initialConversationId) {
+  const store = getStore({ name: "client-profiles", consistency: "strong" });
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const profile = {
+    id, userId, label: label || "Untitled client", createdAt: now, updatedAt: now,
+    conversationIds: initialConversationId ? [initialConversationId] : [],
+  };
+  await store.set(clientProfileKey(userId, id), JSON.stringify(profile), {
+    metadata: { userId, label: profile.label, updatedAt: now },
+  });
+  return profile;
+}
+
+export async function loadClientProfile(userId, clientProfileId) {
+  const store = getStore({ name: "client-profiles", consistency: "strong" });
+  try {
+    const text = await store.get(clientProfileKey(userId, clientProfileId), { type: "text" });
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function listClientProfiles(userId) {
+  const store = getStore({ name: "client-profiles", consistency: "strong" });
+  try {
+    const { blobs } = await store.list({ prefix: `${userId}/` });
+    const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));
+    return entries.filter(Boolean).map((t) => JSON.parse(t));
+  } catch {
+    return [];
+  }
+}
+
+// Called once when a NEW conversation is started under an EXISTING client
+// (as opposed to createClientProfile, which is for a brand-new client) --
+// a single read-modify-write, not something that races with itself the way
+// the conversation record's own per-turn saves do, since it's only ever
+// called once per new conversation, at creation.
+export async function addConversationToClientProfile(userId, clientProfileId, conversationId) {
+  const store = getStore({ name: "client-profiles", consistency: "strong" });
+  const profile = await loadClientProfile(userId, clientProfileId);
+  if (!profile) throw new Error("Client profile not found");
+  if (profile.userId !== userId) throw new Error("Client profile does not belong to this agent");
+  if (!profile.conversationIds.includes(conversationId)) {
+    profile.conversationIds.push(conversationId);
+    profile.updatedAt = new Date().toISOString();
+    await store.set(clientProfileKey(userId, clientProfileId), JSON.stringify(profile), {
+      metadata: { userId, label: profile.label, updatedAt: profile.updatedAt },
+    });
+  }
+  return profile;
+}
+
 export function clientDocPrefix(userId, conversationId) {
   return `${userId}/${conversationId}/`;
 }

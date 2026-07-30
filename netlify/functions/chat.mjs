@@ -6,6 +6,7 @@ import {
   CORS, jsonError, requireUser, looksLikePdf, clientDocPrefix,
   loadConversation, saveConversation, logAccess, readAccessLog,
   CARRIERS, CARRIER_NAMES, SLOT_LABELS, saveRecommendation,
+  createClientProfile, addConversationToClientProfile,
 } from "./_shared.mjs";
 import { crossCheckBuild, crossCheckA1C, crossCheckPSA } from "./_lookup.mjs";
 import { computeGuidelineVersionHash, buildIntakeCacheKey, getCachedRecommendation, saveCachedRecommendation } from "./_cache.mjs";
@@ -900,7 +901,7 @@ export default async function handler(req) {
 
   if (req.method !== "POST") return jsonError(405, "Method not allowed");
 
-  const { conversationId, message, debug } = await req.json();
+  const { conversationId, message, debug, clientProfileId: incomingClientProfileId } = await req.json();
   if (!conversationId) return jsonError(400, "conversationId is required");
   if (!message?.trim()) return jsonError(400, "message is required");
 
@@ -1048,6 +1049,59 @@ export default async function handler(req) {
       record.narrativeStatus = narrativeStatus;
       record.carrierStatus = mergedStatus;
 
+      // Resolve the client profile BEFORE the recommendation record is
+      // saved below, so the recommendation carries the correct
+      // clientProfileId from creation rather than needing a later patch.
+      // Only relevant on the first turn of a new conversation -- a
+      // follow-up's record already has clientProfileId from that turn.
+      // Label is derived here too (moved earlier than its previous spot in
+      // the non-follow-up bookkeeping below) since createClientProfile
+      // needs a label and re-deriving it there would be redundant.
+      if (!isFollowUp) {
+        record.profileText = message;
+        record.carrierSelection = selectedForRecord;
+        record.tier = tierForRecord;
+        record.tableStatus = tableStatus;
+        record.clientDocKeys = clientDocKeysForRecord;
+        if (!record.label) record.label = deriveLabel(record.profileText, replyText);
+
+        if (!record.clientProfileId) {
+          try {
+            let resolvedProfileId = incomingClientProfileId || null;
+            if (resolvedProfileId) {
+              try {
+                await addConversationToClientProfile(userId, resolvedProfileId, conversationId);
+              } catch {
+                // Given id didn't exist or doesn't belong to this agent --
+                // fall through to creating a new profile rather than
+                // silently leaving this conversation unassigned.
+                resolvedProfileId = null;
+              }
+            }
+            if (!resolvedProfileId) {
+              const profile = await createClientProfile(userId, record.label, conversationId);
+              resolvedProfileId = profile.id;
+            }
+            record.clientProfileId = resolvedProfileId;
+
+            // Catch-up: any client docs already uploaded for this
+            // conversation (before analysis ever ran) predate knowing the
+            // clientProfileId -- stamp it onto their metadata now so they're
+            // findable by client, not just by conversation.
+            if (clientDocKeysForRecord?.length) {
+              for (const key of clientDocKeysForRecord) {
+                try {
+                  const buf = await clientStore.get(key, { type: "arrayBuffer" });
+                  if (!buf) continue;
+                  const existing = await clientStore.getMetadata(key);
+                  await clientStore.set(key, buf, { metadata: { ...(existing?.metadata || {}), clientProfileId: resolvedProfileId } });
+                } catch { /* best-effort catch-up stamp, never blocks the reply */ }
+              }
+            }
+          } catch { /* client-profile creation failing must never block the reply the agent already received */ }
+        }
+      }
+
       // Structured recommendation record: a second, cheap tool-forced
       // extraction pass (see extractStructuredRecommendation) reads back the
       // already-completed answer and produces schema-valid structured data,
@@ -1070,6 +1124,7 @@ export default async function handler(req) {
             const saved = await saveRecommendation({
               ...cachedRecommendation,
               userId, conversationId, timestamp: now, status: "ok", servedFromCache: true, cacheKey,
+              clientProfileId: record.clientProfileId || null,
               agentReviewed: false, agentAgreed: null,
             });
             recommendationInfo = {
@@ -1101,6 +1156,7 @@ export default async function handler(req) {
             await logAccess(userId, conversationId, "recommendation_extraction_failed");
             const saved = await saveRecommendation({
               userId, conversationId, timestamp: now, status: "extraction_failed",
+              clientProfileId: record.clientProfileId || null,
               errorMessage: extractErr.message, rawAnswerText: replyText,
             });
             recommendationInfo = { key: saved.key, recordSaved: false, status: "extraction_failed" };
@@ -1127,6 +1183,7 @@ export default async function handler(req) {
             };
             const saved = await saveRecommendation({
               userId, conversationId, timestamp: now, status: "ok",
+              clientProfileId: record.clientProfileId || null,
               ...recordFields, agentReviewed: false, agentAgreed: null,
             });
             recommendationInfo = {
@@ -1173,6 +1230,7 @@ export default async function handler(req) {
           try {
             const saved = await saveRecommendation({
               userId, conversationId, timestamp: now, status: "extraction_failed",
+              clientProfileId: record.clientProfileId || null,
               errorMessage: pipelineErr.message, rawAnswerText: replyText,
             });
             recommendationInfo = { key: saved.key, recordSaved: false, status: "extraction_failed" };
@@ -1184,13 +1242,10 @@ export default async function handler(req) {
       if (recommendationInfo) controller.enqueue(sse("recommendation", recommendationInfo));
 
       if (!isFollowUp) {
-        record.profileText = message;
-        record.carrierSelection = selectedForRecord;
-        record.tier = tierForRecord;
-        record.tableStatus = tableStatus;
-        record.clientDocKeys = clientDocKeysForRecord;
+        // profileText/carrierSelection/tier/tableStatus/clientDocKeys/label/
+        // clientProfileId are all already set above, before the
+        // recommendation record was saved.
         record.turns.push({ role: "assistant", text: replyText, recommendation: recommendationInfo });
-        if (!record.label) record.label = deriveLabel(record.profileText, replyText);
       } else {
         record.turns.push({ role: "user", text: message });
         record.turns.push({ role: "assistant", text: replyText, recommendation: recommendationInfo });
