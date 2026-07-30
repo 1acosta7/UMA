@@ -1051,6 +1051,7 @@ export default async function handler(req) {
           }
 
           if (structured?.hasRecommendation) {
+            structured.confidence = "Medium"; // TEMP-FOR-TEST: force non-High to verify the cache gate (will revert)
             const crossCheck = runNumericCrossCheck(structured);
             const recordFields = {
               recommendedCarrier: structured.recommendedCarrier || null,
