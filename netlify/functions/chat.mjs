@@ -141,17 +141,18 @@ This is a TRANSCRIPTION task for diagnoses/medications/productObjective, not a s
 
 DIAGNOSES -- for each distinct condition mentioned, output one entry with:
 - "condition": the shortest standard medical name for it, lowercase, no extra words. Use the condition itself, never a synonym or expanded form -- "type 2 diabetes" not "diabetes mellitus type II" or "adult-onset diabetes"; "rheumatoid arthritis" not "RA"; "high blood pressure" not "hypertension" UNLESS the source text itself says "hypertension" (transcribe the term actually used, don't translate between equivalent terms).
-- "modifiers": every qualifying detail about THAT condition, each as its own short atomic phrase, lowercase, in this exact form:
-  * Negation of a sub-condition/complication: always "no X" (never "without X", "free of X", "absent X", "no history of X") -- e.g. "no neuropathy", "no retinopathy", "no kidney complications".
+- "modifiers": EVERY qualifying detail about THAT condition -- completeness matters more than brevity here. Before you finalize a condition's modifiers, re-scan its clause in the source text one more time and check off each distinct qualifying phrase against your list; a dropped modifier (one that IS in the text but didn't make it into your list) is a worse error than an extra one. Each modifier is its own short atomic phrase, lowercase, in this exact form -- never merge two qualifying facts into one modifier, never skip one because another modifier already seems to "cover" the same clause:
+  * Negation of a sub-condition/complication: always "no X" (never "without X", "free of X", "absent X", "no history of X") -- e.g. "no neuropathy", "no retinopathy", "no kidney complications". Each negated item gets its own modifier -- "no neuropathy, retinopathy, or kidney complications" in the source text becomes THREE separate modifiers ("no neuropathy", "no retinopathy", "no kidney complications"), not one.
   * Treatment/medication status: always "on X" (never "taking X", "using X", "treated with X", "managed with X") -- e.g. "on insulin", "on humira".
   * Severity: a single word only -- "mild", "moderate", "severe".
+  * Functional/limitation status: "no functional limitations" or "functional limitations" (never "no limitations", "unrestricted", "limited function", etc.)
   * Control status: "well-controlled" or "poorly controlled" (never "controlled", "under control", "not well managed", etc.)
-  * One fact per modifier -- never combine two facts into one modifier string.
+  * Care/hospitalization history: always "no hospitalization" or "hospitalized" (never "no hospital visits", "never admitted", etc.)
   Do not invent a modifier that isn't stated. Leave modifiers empty if none are given beyond the condition name itself.
 
-MEDICATIONS -- the medication name only, lowercase, generic or brand exactly as stated (don't translate between brand/generic), no dosage or frequency detail unless that's the only thing distinguishing two otherwise-identical medication mentions.
+MEDICATIONS -- list EVERY medication or treatment named anywhere in the case, lowercase, generic or brand exactly as stated (don't translate between brand/generic), no dosage or frequency detail unless that's the only thing distinguishing two otherwise-identical medication mentions. Include a medication here EVERY time it's mentioned even if it's ALSO captured as an "on X" modifier under a diagnosis (e.g. insulin appears in both the diabetes diagnosis's modifiers AND the medications list) -- some redundancy between these two fields is expected and correct. Do not skip a medication from this list on the theory that it's "already covered" elsewhere -- that judgment call is exactly what caused inconsistent output before.
 
-PRODUCT OBJECTIVE -- classify into exactly one of the enum values on the tool schema. If the case describes it in different words than the enum label (e.g. "small final expense policy," "burial insurance"), map it to the correct enum value -- do not invent a new label.
+PRODUCT OBJECTIVE -- classify into exactly one of the enum values on the tool schema. If the case describes it in different words than the enum label (e.g. "small final expense policy," "burial insurance"), map it to the correct enum value -- do not invent a new label. When the text combines two enum concepts (e.g. "final expense whole life insurance," "final expense policy underwritten as whole life"), "final expense" always wins -- it is the more specific category, and final expense products are conventionally structured as whole life anyway, so "whole life" alone is reserved for cases that do NOT also mention final expense/burial insurance.
 
 Call record_client_intake exactly once.`;
 
@@ -166,7 +167,7 @@ const INTAKE_TOOL = {
       heightIn: { type: "number", description: "Total height in inches, only if an exact height is stated (convert feet/inches to total inches)." },
       weightLbs: { type: "number" },
       tobacco: { type: "string", enum: ["yes", "no"], description: "Only if tobacco/nicotine use is explicitly addressed either way." },
-      medications: { type: "array", items: { type: "string" }, description: "Medication names only, lowercase, transcribed exactly as stated -- see system prompt." },
+      medications: { type: "array", items: { type: "string" }, description: "Every medication named anywhere in the case, lowercase, transcribed exactly as stated -- include it here even if it's also captured as an 'on X' diagnosis modifier, always, see system prompt." },
       diagnoses: {
         type: "array",
         description: "One entry per distinct condition -- see system prompt for exact canonicalization and modifier rules.",
