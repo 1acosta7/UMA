@@ -826,9 +826,18 @@ async function extractStructuredRecommendation(anthropic, { profileText, replyTe
 // passed" instead of both looking like silence.
 function runNumericCrossCheck(structured) {
   if (!structured?.hasRecommendation) return { flagged: false, checks: [], dataGaps: { winner: null, others: [] } };
-  const { recommendedCarrier, rateClass, clientNumerics = {}, chain = [] } = structured;
+  const { recommendedCarrier, rateClass } = structured;
+  // Destructuring defaults only cover `undefined`, not other falsy/malformed
+  // values -- the extraction tool call has occasionally returned an explicit
+  // `chain: null` or a non-object `clientNumerics`, which crashed this whole
+  // function (chain.map is not a function) and forced an otherwise-valid,
+  // High-confidence recommendation into the extraction_failed fallback path
+  // for no reason related to the actual recommendation. Normalize instead of
+  // trusting the shape.
+  const clientNumerics = (structured.clientNumerics && typeof structured.clientNumerics === "object") ? structured.clientNumerics : {};
+  const chain = Array.isArray(structured.chain) ? structured.chain : [];
 
-  const carriersToCheck = new Set([recommendedCarrier, ...chain.map((c) => c.carrier)].filter(Boolean));
+  const carriersToCheck = new Set([recommendedCarrier, ...chain.map((c) => c?.carrier)].filter(Boolean));
   const gapsByCarrierName = {};
   let winningChecks = [];
 
