@@ -476,6 +476,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
 
   let contentBlocks, tableStatus, narrativeStatus, mergedStatus, messages, selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord;
   let cacheKey = null;
+  let intakeForDebug = null;
 
   if (!isFollowUp) {
     // ---- Consistency cache: check BEFORE triage/research/final-analysis ----
@@ -504,13 +505,14 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
     try {
       if (hasClientDocs) throw new Error("client documents attached -- skip cache");
       const intake = await extractClientIntake(anthropic, message);
+      intakeForDebug = intake; // surfaced via debug:true only, for diagnosing cache-key instability
       const versionHash = await computeGuidelineVersionHash(supabase);
       cacheKey = buildIntakeCacheKey(intake, versionHash);
       const cached = await getCachedRecommendation(cacheKey);
       if (cached) {
         return {
           record: record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [] },
-          isFollowUp: false, cacheHit: true, cacheKey,
+          isFollowUp: false, cacheHit: true, cacheKey, intakeForDebug,
           cachedReplyText: cached.replyText,
           cachedRecommendation: cached.recommendation || null,
           tableStatus: cached.tableStatus || {}, narrativeStatus: cached.narrativeStatus || {},
@@ -687,7 +689,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
   }
 
   return {
-    record, isFollowUp, cacheHit: false, cacheKey, tableStatus, narrativeStatus, mergedStatus, messages,
+    record, isFollowUp, cacheHit: false, cacheKey, intakeForDebug, tableStatus, narrativeStatus, mergedStatus, messages,
     selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord,
   };
 }
@@ -920,8 +922,12 @@ export default async function handler(req) {
       carrierSelection: ctx.isFollowUp ? (ctx.record.carrierSelection || {}) : ctx.selectedForRecord,
       tier: ctx.isFollowUp ? (ctx.record.tier || {}) : ctx.tierForRecord,
       narrativeChunks: (ctx.narrativeChunksForRecord || []).map((m) => ({ carrier: m.carrier, slot: m.slot_label || m.slot_id, page: m.page_number, preview: (m.content || "").slice(0, 120) })),
-      firstMessageBlockCount: ctx.messages[0].content.length, turnsSoFar: ctx.record.turns.length,
+      firstMessageBlockCount: ctx.messages?.[0]?.content?.length ?? null, turnsSoFar: ctx.record.turns.length,
       accessLog: await readAccessLog(userId, conversationId),
+      // Cache diagnostics -- raw pre-triage intake extraction + the key it
+      // hashed to, so two calls on identical text can be compared directly
+      // to see exactly which field (if any) diverged.
+      cacheHit: !!ctx.cacheHit, cacheKey: ctx.cacheKey ?? null, intake: ctx.intakeForDebug ?? null,
     }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
