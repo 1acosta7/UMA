@@ -653,20 +653,27 @@ async function extractStructuredRecommendation(anthropic, { profileText, replyTe
 
   const userText = `CLIENT PROFILE:\n${profileText}\n\nFINAL ANSWER GIVEN TO THE AGENT:\n${replyText}\n\nRETRIEVED GUIDELINE EXCERPTS (narrative search results, may cover carriers beyond the recommended one):\n${chunkText || "(none retrieved)"}`;
 
-  try {
-    const resp = await anthropic.messages.create({
-      model: "claude-haiku-4-5",
-      max_tokens: 3000,
-      system: EXTRACT_SYSTEM,
-      tools: [EXTRACT_TOOL],
-      tool_choice: { type: "tool", name: "record_structured_recommendation" },
-      messages: [{ role: "user", content: userText }],
-    });
-    const toolUse = resp.content.find((b) => b.type === "tool_use" && b.name === "record_structured_recommendation");
-    return toolUse?.input || null;
-  } catch {
-    return null; // extraction failed -- no structured record for this turn (disclosed gap, see report)
+  // Deliberately no try/catch here -- a genuine failure (API exception,
+  // malformed/missing tool_use, empty response) must propagate to the
+  // caller as a thrown error, not collapse into the same "null" this
+  // function used to return for it. That collapse is exactly what made a
+  // real extraction failure indistinguishable from a legitimate
+  // hasRecommendation:false answer (a clarifying question) -- both used to
+  // vanish with no record and no signal. The caller now handles the two
+  // cases differently: see the fallback record in the handler below.
+  const resp = await anthropic.messages.create({
+    model: "claude-haiku-4-5",
+    max_tokens: 3000,
+    system: EXTRACT_SYSTEM,
+    tools: [EXTRACT_TOOL],
+    tool_choice: { type: "tool", name: "record_structured_recommendation" },
+    messages: [{ role: "user", content: userText }],
+  });
+  const toolUse = resp.content.find((b) => b.type === "tool_use" && b.name === "record_structured_recommendation");
+  if (!toolUse || !toolUse.input) {
+    throw new Error("Extraction call completed but returned no valid record_structured_recommendation tool call.");
   }
+  return toolUse.input;
 }
 
 // Lightweight numeric cross-check (see _lookup.mjs): never overrides or
@@ -837,13 +844,35 @@ export default async function handler(req) {
       let recommendationInfo = null;
       try {
         const profileTextForExtraction = isFollowUp ? `${record.profileText}\n\nFollow-up: ${message}` : message;
-        const structured = await extractStructuredRecommendation(anthropic, {
-          profileText: profileTextForExtraction, replyText, narrativeChunks: narrativeChunksForRecord,
-        });
+
+        // extractStructuredRecommendation now throws on a genuine failure
+        // (API exception, malformed/missing tool_use) instead of returning
+        // null for it -- null used to mean the exact same thing as a
+        // legitimate hasRecommendation:false answer (a clarifying question),
+        // so a real failure and "nothing to record" were indistinguishable
+        // and both vanished with no trace. Caught here, separately, so a
+        // real failure gets its own minimal fallback record and a flag the
+        // agent can actually see, instead of silently looking identical to
+        // a normal turn that just didn't need a recommendation.
+        let structured;
+        try {
+          structured = await extractStructuredRecommendation(anthropic, {
+            profileText: profileTextForExtraction, replyText, narrativeChunks: narrativeChunksForRecord,
+          });
+        } catch (extractErr) {
+          await logAccess(userId, conversationId, "recommendation_extraction_failed");
+          const saved = await saveRecommendation({
+            userId, conversationId, timestamp: now, status: "extraction_failed",
+            errorMessage: extractErr.message, rawAnswerText: replyText,
+          });
+          recommendationInfo = { key: saved.key, recordSaved: false, status: "extraction_failed" };
+          structured = null;
+        }
+
         if (structured?.hasRecommendation) {
           const crossCheck = runNumericCrossCheck(structured);
           const saved = await saveRecommendation({
-            userId, conversationId, timestamp: now,
+            userId, conversationId, timestamp: now, status: "ok",
             recommendedCarrier: structured.recommendedCarrier || null,
             recommendedProduct: structured.recommendedProduct || null,
             rateClass: structured.rateClass || null,
@@ -860,9 +889,23 @@ export default async function handler(req) {
             agentReviewed: false,
             agentAgreed: null,
           });
-          recommendationInfo = { key: saved.key, flaggedForReview: saved.flaggedForReview, flagReason: saved.flagReason };
+          recommendationInfo = { key: saved.key, flaggedForReview: saved.flaggedForReview, flagReason: saved.flagReason, recordSaved: true, status: "ok" };
         }
-      } catch { /* extraction/cross-check/persistence failing must never block the reply the agent already received */ }
+      } catch (pipelineErr) {
+        // A failure OUTSIDE extraction itself -- e.g. saveRecommendation's
+        // own Blobs write failing after a successful extraction. Rarer, but
+        // the same class of silent gap if swallowed, so it gets the same
+        // treatment: logged through the existing access-log mechanism, and
+        // a best-effort fallback record (raw answer text at minimum).
+        await logAccess(userId, conversationId, "recommendation_persist_failed");
+        try {
+          const saved = await saveRecommendation({
+            userId, conversationId, timestamp: now, status: "extraction_failed",
+            errorMessage: pipelineErr.message, rawAnswerText: replyText,
+          });
+          recommendationInfo = { key: saved.key, recordSaved: false, status: "extraction_failed" };
+        } catch { /* persistence itself is down -- the agent's reply still isn't blocked, but truly nothing more to log here */ }
+      }
 
       stopHeartbeat();
       if (recommendationInfo) controller.enqueue(sse("recommendation", recommendationInfo));

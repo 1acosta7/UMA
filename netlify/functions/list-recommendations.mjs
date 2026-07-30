@@ -18,7 +18,12 @@ export default async function handler(req) {
   const { conversationId } = await req.json();
   if (!conversationId) return jsonError(400, "conversationId is required");
 
-  const recommendations = await listRecommendations(userId, conversationId);
+  // status is normalized here, not filtered -- extraction_failed records are
+  // real entries in this list (a fallback record with only rawAnswerText/
+  // errorMessage, not a normal completed one), never dropped. The fallback
+  // covers records saved before `status` existed on every record.
+  const recommendations = (await listRecommendations(userId, conversationId))
+    .map((r) => ({ ...r, status: r.status || "ok" }));
   return new Response(JSON.stringify({ recommendations }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },
   });

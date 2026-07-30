@@ -680,6 +680,20 @@ const CARRIER_STATUS_LABEL = { none: 'not uploaded', uploaded: 'checked', matche
 // when reopening a past conversation to reflect an already-submitted review.
 function renderRecommendationControls(bubble, convId, recInfo, reviewState) {
   if (!recInfo?.key) return;
+
+  // The structured audit record failed to save for this turn -- the agent's
+  // answer above is unaffected and still correct, so this is a small, muted,
+  // non-blocking note, not an error banner. No retry control yet, just
+  // visibility: this turn has no reviewable/thumbs-able record behind it.
+  const failed = recInfo.recordSaved === false || reviewState?.status === 'extraction_failed';
+  if (failed) {
+    const note = document.createElement('div');
+    note.style.cssText = 'margin-top:.75rem;padding-top:.6rem;border-top:1px solid var(--border);display:flex;align-items:center;gap:.35rem;font-size:.75rem;color:var(--muted);';
+    note.innerHTML = `<i class="ti ti-file-off"></i><span>Audit record not saved for this response</span>`;
+    bubble.appendChild(note);
+    return;
+  }
+
   const wrap = document.createElement('div');
   wrap.className = 'rec-controls';
   wrap.style.cssText = 'margin-top:.75rem;padding-top:.6rem;border-top:1px solid var(--border);display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;font-size:.8rem;';
