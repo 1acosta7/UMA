@@ -175,6 +175,7 @@
     .conv-item.active { background: rgba(55,138,221,.12); }
     .conv-item-label { font-size: .82rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .conv-item-date { font-size: .7rem; color: var(--muted); margin-top: .1rem; }
+    .client-group { margin-bottom: .35rem; }
     .chat-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
     .sidebar-toggle { display: none; }
     @media (max-width: 820px) {
@@ -429,6 +430,17 @@
         <div id="carrier-cards">
           <div class="load-row" style="padding:2rem 0"><div class="spin"></div> Loading…</div>
         </div>
+
+        <div class="setup-hd" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
+          <div>
+            <h2>Client Profiles</h2>
+            <p>One-time migration: existing conversations predate client profiles. Preview first -- it reports counts without changing anything -- then run for real.</p>
+          </div>
+          <div style="display:flex;gap:.5rem;flex-shrink:0">
+            <button class="sbtn" id="backfill-preview-btn" onclick="runBackfill(true)"><i class="ti ti-eye"></i> Preview</button>
+            <button class="sbtn" id="backfill-run-btn" onclick="runBackfill(false)"><i class="ti ti-database-import"></i> Run backfill</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -442,6 +454,14 @@
   </div>
 </div>
 
+<div class="overlay" id="backfill-modal" style="display:none">
+  <div class="modal report-modal">
+    <h3><i class="ti ti-database-import"></i> Client Profile Backfill</h3>
+    <div id="backfill-modal-body"></div>
+    <button class="pin-btn" onclick="document.getElementById('backfill-modal').style.display='none'">Close</button>
+  </div>
+</div>
+
 <script>
 const CARRIERS = {
   fg:{name:"F&G",color:"#E85D2F",slots:[{id:"telephone_uw",label:"Life UW Telephone Interview Guide",num:"ADV4620"},{id:"exam_free",label:"Exam-Free Underwriting Guide",num:"ADV2493"},{id:"impairment",label:"Impairment Field UW Guide",num:"ADV5544"},{id:"afge",label:"AFGE Field UW Guide",num:"ADV5620"},{id:"natguard",label:"National Guard Field UW Guide",num:"ADV5601"},{id:"foreign_nat",label:"Foreign National UW Categories",num:"ADV1176"}]},
@@ -452,6 +472,14 @@ const CARRIERS = {
 
 let _clerk, pin = null, streaming = false, loadedKeys = [];
 let conversationId = crypto.randomUUID(), hasAnalyzed = false, attachedDocs = [];
+// The client this conversation belongs to. null means "not yet resolved" --
+// on the first send, chat.mjs will either join the client the agent picked
+// (see startConversationForClient) or create a brand-new one (see
+// newClientProfile), and either way the response tells us which via
+// get-conversation on next reopen. Follow-up sends don't need this to be
+// accurate since chat.mjs only consults it on a conversation's first turn.
+let activeClientProfileId = null;
+let expandedProfiles = new Set();
 
 window.addEventListener('load', async function() {
   await window.Clerk.load();
@@ -504,6 +532,24 @@ function newClientProfile() {
   conversationId = crypto.randomUUID();
   hasAnalyzed = false;
   attachedDocs = [];
+  activeClientProfileId = null; // brand-new client -- chat.mjs creates a fresh profile on first send
+  document.getElementById('messages').innerHTML = EMPTY_STATE_HTML;
+  renderDocChips();
+  updateComposerForThread();
+  document.getElementById('sidebar')?.classList.remove('open');
+  refreshConvList();
+}
+
+// Starting a second (or third...) conversation for a client the agent
+// already has -- e.g. an initial term quote, then an IUL follow-up months
+// later. Same fresh-conversation reset as newClientProfile, but tags the
+// new conversation with the EXISTING clientProfileId instead of letting
+// chat.mjs create a duplicate profile.
+function startConversationForClient(clientProfileId) {
+  conversationId = crypto.randomUUID();
+  hasAnalyzed = false;
+  attachedDocs = [];
+  activeClientProfileId = clientProfileId;
   document.getElementById('messages').innerHTML = EMPTY_STATE_HTML;
   renderDocChips();
   updateComposerForThread();
@@ -547,11 +593,12 @@ async function doClientUp(e) {
       const res = await fetch('/.netlify/functions/upload-client-doc', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
-        body: JSON.stringify({ conversationId, filename: file.name, data: b64 }),
+        body: JSON.stringify({ conversationId, filename: file.name, data: b64, clientProfileId: activeClientProfileId }),
       });
       if (res.status === 401) { await doSignOut(); return; }
       const j = await res.json();
       if (!res.ok) throw new Error(j.error || 'Upload failed');
+      if (j.clientProfileId) activeClientProfileId = j.clientProfileId;
       attachedDocs.push({ docId: j.docId, filename: j.filename });
       renderDocChips();
       toast(`Attached: ${file.name}`, 'ok');
@@ -568,21 +615,64 @@ function relativeDate(iso) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+function toggleProfileExpanded(profileId) {
+  if (expandedProfiles.has(profileId)) expandedProfiles.delete(profileId);
+  else expandedProfiles.add(profileId);
+  refreshConvList();
+}
+
+// Sidebar groups by client profile, not raw conversation -- an agent sees
+// "John Smith" once, expandable into every conversation for that client
+// over time (an initial term quote, then an IUL follow-up months later),
+// instead of a flat list of threads. A profile containing the currently-
+// open conversation auto-expands so the active thread is never hidden.
 async function refreshConvList() {
   const list = document.getElementById('conv-list');
   try {
     const tk = await token();
-    const res = await fetch('/.netlify/functions/list-conversations', { headers: { 'Authorization': `Bearer ${tk}` } });
+    const res = await fetch('/.netlify/functions/list-client-profiles', { headers: { 'Authorization': `Bearer ${tk}` } });
     if (res.status === 401) return;
-    const { conversations } = await res.json();
-    if (!conversations?.length) { list.innerHTML = '<div class="conv-empty">No past clients yet</div>'; return; }
+    const { clientProfiles } = await res.json();
+    if (!clientProfiles?.length) { list.innerHTML = '<div class="conv-empty">No past clients yet</div>'; return; }
     list.innerHTML = '';
-    for (const c of conversations) {
-      const btn = document.createElement('button');
-      btn.className = 'conv-item' + (c.id === conversationId ? ' active' : '');
-      btn.innerHTML = `<div class="conv-item-label">${esc(c.label)}</div><div class="conv-item-date">${relativeDate(c.updatedAt)}</div>`;
-      btn.onclick = () => openConversation(c.id);
-      list.appendChild(btn);
+    for (const p of clientProfiles) {
+      const isActiveGroup = p.conversations.some(c => c.id === conversationId);
+      const isExpanded = isActiveGroup || expandedProfiles.has(p.id);
+
+      const group = document.createElement('div');
+      group.className = 'client-group';
+
+      const hd = document.createElement('button');
+      hd.className = 'conv-item client-group-hd';
+      hd.style.cssText = 'display:flex;align-items:center;gap:.4rem;width:100%';
+      hd.innerHTML = `<i class="ti ti-chevron-${isExpanded ? 'down' : 'right'}" style="flex-shrink:0;opacity:.6"></i>
+        <div style="flex:1;min-width:0">
+          <div class="conv-item-label">${esc(p.label)}</div>
+          <div class="conv-item-date">${p.conversations.length} conversation${p.conversations.length === 1 ? '' : 's'} · ${relativeDate(p.updatedAt)}</div>
+        </div>`;
+      hd.onclick = () => toggleProfileExpanded(p.id);
+      group.appendChild(hd);
+
+      if (isExpanded) {
+        const body = document.createElement('div');
+        body.style.cssText = 'padding-left:1.1rem;border-left:1px solid var(--border);margin-left:.6rem';
+        for (const c of p.conversations) {
+          const btn = document.createElement('button');
+          btn.className = 'conv-item' + (c.id === conversationId ? ' active' : '');
+          btn.innerHTML = `<div class="conv-item-label">${esc(c.label)}</div><div class="conv-item-date">${relativeDate(c.updatedAt)}</div>`;
+          btn.onclick = () => openConversation(c.id);
+          body.appendChild(btn);
+        }
+        const addBtn = document.createElement('button');
+        addBtn.className = 'conv-item';
+        addBtn.style.cssText = 'color:var(--accent)';
+        addBtn.innerHTML = `<div class="conv-item-label"><i class="ti ti-plus"></i> New conversation</div>`;
+        addBtn.onclick = () => startConversationForClient(p.id);
+        body.appendChild(addBtn);
+        group.appendChild(body);
+      }
+
+      list.appendChild(group);
     }
   } catch { /* sidebar failing to load isn't fatal to the main flow */ }
 }
@@ -620,6 +710,7 @@ async function openConversation(id) {
     conversationId = data.id;
     hasAnalyzed = true;
     attachedDocs = (data.clientDocs || []).map(d => ({ filename: d.filename }));
+    activeClientProfileId = data.clientProfileId || null;
 
     const msgs = document.getElementById('messages');
     msgs.innerHTML = '';
@@ -800,7 +891,7 @@ async function send() {
     const res = await fetch('/.netlify/functions/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
-      body: JSON.stringify({ conversationId, message: q }),
+      body: JSON.stringify({ conversationId, message: q, clientProfileId: activeClientProfileId }),
     });
     if (res.status === 401) { await doSignOut(); return; }
     if (!res.ok) throw new Error('Request failed');
@@ -1009,6 +1100,42 @@ function renderVerifyBanner(v) {
   }
   el.style.display = 'flex';
   window.__lastVerification = v;
+}
+
+async function runBackfill(dryRun) {
+  const btn = document.getElementById(dryRun ? 'backfill-preview-btn' : 'backfill-run-btn');
+  if (!dryRun && !confirm('This writes a client profile for every existing conversation that doesn\'t have one yet. Preview first if you haven\'t already. Continue?')) return;
+  if (btn) { btn.disabled = true; btn.innerHTML = `<div class="spin"></div> ${dryRun ? 'Previewing' : 'Running'}…`; }
+  try {
+    const res = await fetch('/.netlify/functions/backfill-client-profiles', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin, dryRun: !!dryRun }),
+    });
+    if (res.status === 401) { pin = null; toast('Incorrect PIN', 'err'); showPin(); return; }
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || 'Backfill failed');
+    const body = document.getElementById('backfill-modal-body');
+    if (j.dryRun) {
+      body.innerHTML = `<p style="color:var(--muted);font-size:.85rem;margin-bottom:.5rem">Dry run -- nothing was changed.</p>
+        <p><b>${j.totalConversations}</b> total conversation records</p>
+        <p><b>${j.alreadyTagged}</b> already have a client profile</p>
+        <p><b>${j.wouldBackfill}</b> would be backfilled (1 new client profile each)</p>`;
+    } else {
+      body.innerHTML = `<p style="color:var(--green)"><i class="ti ti-circle-check"></i> Backfill complete.</p>
+        <p><b>${j.totalConversations}</b> total conversation records</p>
+        <p><b>${j.alreadyTagged}</b> already had a client profile (skipped)</p>
+        <p><b>${j.backfilledConversations}</b> conversations backfilled with a new 1:1 client profile</p>
+        <p><b>${j.backfilledDocs}</b> client documents stamped with clientProfileId</p>
+        <p><b>${j.backfilledRecs}</b> recommendation records stamped with clientProfileId</p>
+        ${j.errors?.length ? `<p style="color:#E85D2F">${j.errors.length} error(s) -- see console</p>` : ''}`;
+      if (j.errors?.length) console.error('Backfill errors:', j.errors);
+    }
+    document.getElementById('backfill-modal').style.display = 'flex';
+  } catch (err) {
+    toast(err.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = dryRun ? '<i class="ti ti-eye"></i> Preview' : '<i class="ti ti-database-import"></i> Run backfill'; }
+  }
 }
 
 async function runVerificationNow() {

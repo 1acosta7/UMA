@@ -46,6 +46,7 @@ export default async function handler(req) {
     updatedAt: record.updatedAt,
     profileText: record.profileText,
     carrierStatus: record.carrierStatus,
+    clientProfileId: record.clientProfileId || null,
     clientDocs,
     turns: record.turns,
   }), {
