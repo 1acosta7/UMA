@@ -45,14 +45,58 @@ export async function computeGuidelineVersionHash(supabase) {
   }
 }
 
+// Light, safe text normalization -- collapses punctuation/whitespace/case
+// variance a model might introduce even when it's otherwise transcribing
+// consistently (extra comma, parenthesis, trailing period). Deliberately
+// NOT aggressive: no synonym mapping, no stemming, no filler-word list
+// beyond a single leading article -- the real fix for semantic paraphrasing
+// (different word choice for the same fact) is the tightened extraction
+// prompt in chat.mjs (INTAKE_SYSTEM/INTAKE_TOOL), which constrains the
+// model to a consistent canonical form in the first place. This is defense
+// in depth for the mechanical noise a prompt can't fully eliminate, not a
+// substitute for getting the extraction itself consistent.
+function normText(s) {
+  if (typeof s !== "string") return s;
+  return s
+    .toLowerCase()
+    .replace(/[().,;:]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^(a|an|the)\s+/, "");
+}
+
+// diagnoses now come as {condition, modifiers} objects (see INTAKE_TOOL) so
+// the qualifying detail that varied most between runs -- "no neuropathy",
+// "on insulin", severity, control status -- is captured as short atomic
+// phrases in a required canonical form, rather than folded into one
+// freeform clause the model rephrased differently each time. Modifiers are
+// sorted within each diagnosis, and diagnoses are sorted by condition name,
+// so word ORDER is never a source of variance regardless of what order the
+// model happened to list things in. Still accepts a plain string per entry
+// (treated as {condition: string, modifiers: []}) for robustness against an
+// older-shaped extraction result.
+function normDiagnoses(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map((d) => {
+      if (typeof d === "string") return { condition: normText(d), modifiers: [] };
+      const condition = normText(d?.condition);
+      const modifiers = Array.isArray(d?.modifiers) ? [...d.modifiers].map(normText).filter(Boolean).sort() : [];
+      return { condition, modifiers };
+    })
+    .filter((d) => d.condition)
+    .sort((a, b) => a.condition.localeCompare(b.condition));
+}
+
 // Deliberately conservative: exact match on every structured field, no
 // fuzzy/approximate matching, no rounding of stated values. Two clients
 // differing in ANY field -- including a medication or diagnosis phrased
-// differently -- get different keys and never collide. Missing fields are
-// represented as null (not omitted), so "field present but empty" and
-// "field never asked about" can't accidentally hash the same.
+// differently enough to survive normText -- get different keys and never
+// collide. Missing fields are represented as null (not omitted), so "field
+// present but empty" and "field never asked about" can't accidentally hash
+// the same.
 export function buildIntakeCacheKey(intake, versionHash) {
-  const norm = (s) => (typeof s === "string" ? s.trim().toLowerCase() : s);
+  const norm = normText;
   const normList = (arr) => (Array.isArray(arr) ? [...arr].map(norm).filter(Boolean).sort() : []);
 
   // Fixed key order -- this IS the canonicalization, no generic object-key
@@ -64,7 +108,7 @@ export function buildIntakeCacheKey(intake, versionHash) {
     weightLbs: intake?.weightLbs ?? null,
     tobacco: norm(intake?.tobacco) ?? null,
     medications: normList(intake?.medications),
-    diagnoses: normList(intake?.diagnoses),
+    diagnoses: normDiagnoses(intake?.diagnoses),
     coverageAmount: intake?.coverageAmount ?? null,
     productObjective: norm(intake?.productObjective) ?? null,
     guidelineVersionHash: versionHash,

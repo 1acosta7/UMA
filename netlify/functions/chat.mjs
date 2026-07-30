@@ -124,7 +124,36 @@ Return JSON only:
 // If this extraction itself varies between two runs of literally identical
 // text, the worst case is a cache MISS (falls back to running the full
 // pipeline normally), never a wrong hit -- see buildIntakeCacheKey.
-const INTAKE_SYSTEM = `You are extracting structured intake fields from a life insurance case description, for exact-match cache-key purposes only -- this is not an underwriting judgment. Extract ONLY values explicitly and exactly stated. Never infer, estimate, round, or normalize (e.g. do not turn "mid-60s" into a specific age, do not convert an approximate weight into a number) -- if a field isn't stated as an exact value, leave it out entirely. Call record_client_intake exactly once.`;
+//
+// diagnoses/medications/productObjective are the fields that actually
+// varied between runs -- free-text fields the model was paraphrasing
+// (different word choice, different grouping of qualifiers) rather than
+// transcribing consistently. Fixed by separating WHAT (a canonical
+// condition name, low-variance) from the qualifying DETAIL (broken into
+// short atomic phrases in a consistent form, rather than one long freeform
+// clause the model rephrases each time) and by sorting everything in code
+// (buildIntakeCacheKey), so word-order is never a source of variance at
+// all. Numeric fields (age, height/weight, coverage amount) are untouched
+// -- they were already stable and are not part of this fix.
+const INTAKE_SYSTEM = `You are extracting structured intake fields from a life insurance case description, for exact-match cache-key purposes only -- this is not an underwriting judgment. Extract ONLY values explicitly and exactly stated. Never infer, estimate, round, or normalize a NUMBER that isn't explicit (e.g. do not turn "mid-60s" into a specific age, do not convert an approximate weight into a number) -- if a field isn't stated as an exact value, leave it out entirely.
+
+This is a TRANSCRIPTION task for diagnoses/medications/productObjective, not a summarization task. The single biggest source of error is paraphrasing the same clinical fact differently across two runs of identical input text -- follow these rules exactly, every time, so the same input always produces the same output:
+
+DIAGNOSES -- for each distinct condition mentioned, output one entry with:
+- "condition": the shortest standard medical name for it, lowercase, no extra words. Use the condition itself, never a synonym or expanded form -- "type 2 diabetes" not "diabetes mellitus type II" or "adult-onset diabetes"; "rheumatoid arthritis" not "RA"; "high blood pressure" not "hypertension" UNLESS the source text itself says "hypertension" (transcribe the term actually used, don't translate between equivalent terms).
+- "modifiers": every qualifying detail about THAT condition, each as its own short atomic phrase, lowercase, in this exact form:
+  * Negation of a sub-condition/complication: always "no X" (never "without X", "free of X", "absent X", "no history of X") -- e.g. "no neuropathy", "no retinopathy", "no kidney complications".
+  * Treatment/medication status: always "on X" (never "taking X", "using X", "treated with X", "managed with X") -- e.g. "on insulin", "on humira".
+  * Severity: a single word only -- "mild", "moderate", "severe".
+  * Control status: "well-controlled" or "poorly controlled" (never "controlled", "under control", "not well managed", etc.)
+  * One fact per modifier -- never combine two facts into one modifier string.
+  Do not invent a modifier that isn't stated. Leave modifiers empty if none are given beyond the condition name itself.
+
+MEDICATIONS -- the medication name only, lowercase, generic or brand exactly as stated (don't translate between brand/generic), no dosage or frequency detail unless that's the only thing distinguishing two otherwise-identical medication mentions.
+
+PRODUCT OBJECTIVE -- classify into exactly one of the enum values on the tool schema. If the case describes it in different words than the enum label (e.g. "small final expense policy," "burial insurance"), map it to the correct enum value -- do not invent a new label.
+
+Call record_client_intake exactly once.`;
 
 const INTAKE_TOOL = {
   name: "record_client_intake",
@@ -137,10 +166,21 @@ const INTAKE_TOOL = {
       heightIn: { type: "number", description: "Total height in inches, only if an exact height is stated (convert feet/inches to total inches)." },
       weightLbs: { type: "number" },
       tobacco: { type: "string", enum: ["yes", "no"], description: "Only if tobacco/nicotine use is explicitly addressed either way." },
-      medications: { type: "array", items: { type: "string" } },
-      diagnoses: { type: "array", items: { type: "string" } },
+      medications: { type: "array", items: { type: "string" }, description: "Medication names only, lowercase, transcribed exactly as stated -- see system prompt." },
+      diagnoses: {
+        type: "array",
+        description: "One entry per distinct condition -- see system prompt for exact canonicalization and modifier rules.",
+        items: {
+          type: "object",
+          properties: {
+            condition: { type: "string", description: "Shortest standard medical name, lowercase." },
+            modifiers: { type: "array", items: { type: "string" }, description: "Atomic qualifying phrases in the required canonical form (no X / on X / severity word / control status)." },
+          },
+          required: ["condition"],
+        },
+      },
       coverageAmount: { type: "number" },
-      productObjective: { type: "string", description: "e.g. 'final expense', 'term', 'whole life', 'IUL' -- only if explicitly stated." },
+      productObjective: { type: "string", enum: ["final expense", "term", "whole life", "universal life", "iul", "annuity", "other"], description: "Only if a product objective is explicitly stated or clearly implied by a specific product/coverage type named." },
     },
   },
 };
