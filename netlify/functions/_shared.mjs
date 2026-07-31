@@ -70,6 +70,99 @@ export const SLOT_LABELS = {
   },
 };
 
+// Phase 4 (product-type organization). The 5 UI-facing buckets the agent can
+// filter by -- deliberately the exact set requested, not auto-derived from
+// every distinct productType string in Phase 1's JSON mapping (which had
+// finer-grained values like "Participating Whole Life" or "FE/Simplified
+// Issue (graded)"). GUL has no documented product in this library at all
+// (confirmed during Phase 1 -- none of the 26 files describe a guaranteed-UL
+// product) -- filtering to it correctly yields zero product-specific
+// documents from every carrier; that's an accurate reflection of the source
+// library, not a bug to work around.
+export const PRODUCT_TYPES = ["iul", "term", "whole_life", "final_expense", "gul"];
+export const PRODUCT_TYPE_NAMES = { iul: "IUL", term: "Term", whole_life: "Whole Life", final_expense: "Final Expense", gul: "GUL" };
+
+// Per-slot product-type relevance, derived directly from Phase 1's full-
+// document read (each file's own PRODUCT TYPE field in
+// UNDERWRITING_KNOWLEDGE_BASE.md, and its confirmed JSON mapping).
+// `crossCutting: true` means the document applies regardless of product-type
+// filter (general/master UW guides, APS ordering process docs, financial UW,
+// foreign-national/immigration eligibility, occupation overlays, product-line
+// overview worksheets) -- it's excluded only by carrier licensing, never by
+// a product-type filter. `productTypes` lists which of the 5 buckets a
+// NON-cross-cutting document is actually relevant to; several Foresters/
+// F&G/Allianz slots list more than one bucket because the single source PDF
+// genuinely covers multiple product lines (e.g. Foresters' main UW guide
+// covers Your Term/Strong Foundation [term], Advantage Plus II [whole_life],
+// and SMART UL -- SMART UL isn't indexed and doesn't cleanly fit any of the
+// 5 buckets on its own, so it's folded into the closest bucket, iul, rather
+// than inventing a 6th "UL" bucket the user didn't ask for).
+export const SLOT_PRODUCT_TYPES = {
+  fg: {
+    telephone_uw: { crossCutting: true, productTypes: [] },
+    exam_free: { crossCutting: false, productTypes: ["iul"] },
+    impairment: { crossCutting: false, productTypes: ["iul"] },
+    afge: { crossCutting: false, productTypes: ["iul"] },
+    natguard: { crossCutting: false, productTypes: ["iul"] },
+    foreign_nat: { crossCutting: true, productTypes: [] },
+  },
+  foresters: {
+    main_uw: { crossCutting: false, productTypes: ["term", "whole_life", "iul"] },
+    main_uw_apr26: { crossCutting: false, productTypes: ["term", "whole_life", "iul"] },
+    accel_uw: { crossCutting: false, productTypes: ["term", "whole_life"] }, // Your Term, SMART UL, Advantage Plus II only -- not Strong Foundation/PlanRight/BrightFuture, per Phase 1
+    nonmed: { crossCutting: true, productTypes: [] }, // product-line overview across all 7 Foresters products
+    diabetes: { crossCutting: false, productTypes: ["term", "whole_life"] }, // Your Term, Advantage Plus II, SMART UL only
+    immigration: { crossCutting: true, productTypes: [] },
+    brightfuture: { crossCutting: false, productTypes: ["whole_life"] }, // juvenile whole life
+    planright: { crossCutting: false, productTypes: ["final_expense"] },
+  },
+  allianz: {
+    uw_guide: { crossCutting: true, productTypes: [] },
+    uw_financial: { crossCutting: true, productTypes: [] },
+    uw_pathways: { crossCutting: true, productTypes: [] }, // covers Accelerated/Boosted (IUL-specific) AND the general Classic pathway
+    aps: { crossCutting: true, productTypes: [] },
+    athletes: { crossCutting: true, productTypes: [] },
+    accel: { crossCutting: false, productTypes: ["iul"] }, // explicitly "single indexed universal life insurance policies" only
+  },
+  transamerica: {
+    fe_express: { crossCutting: false, productTypes: ["final_expense"] },
+    trendsetter: { crossCutting: false, productTypes: ["term"] },
+    lifetime_wl: { crossCutting: false, productTypes: ["whole_life"] },
+    ffiul_ii: { crossCutting: false, productTypes: ["iul"] },
+    fciul_ii: { crossCutting: false, productTypes: ["iul"] },
+    foreign_nat: { crossCutting: true, productTypes: [] },
+  },
+};
+
+// null productType means no filter is active -- everything matches. An
+// unrecognized (carrier, slotId) pair (a document not yet mapped above)
+// fails OPEN (matches) rather than being silently excluded from every
+// product-type filter forever -- the same fail-open posture used for
+// licensedCarriers being unset in Phase 3.
+export function docMatchesProductType(carrier, slotId, productType) {
+  if (!productType) return true;
+  const entry = SLOT_PRODUCT_TYPES[carrier]?.[slotId];
+  if (!entry) return true;
+  if (entry.crossCutting) return true;
+  return entry.productTypes.includes(productType);
+}
+
+// Maps the intake extraction's productObjective enum (INTAKE_TOOL in
+// chat.mjs) onto the 5 UI buckets above, for automatic inference when the
+// agent hasn't explicitly picked a product-type filter. "annuity" and
+// "other" have no mapping (return null -- no filter applied) since neither
+// corresponds to a life-insurance product-type bucket in this system.
+export function mapProductObjectiveToType(productObjective) {
+  const map = {
+    "final expense": "final_expense",
+    "term": "term",
+    "whole life": "whole_life",
+    "universal life": "iul",
+    "iul": "iul",
+  };
+  return map[String(productObjective || "").toLowerCase()] || null;
+}
+
 // Per-agent settings, one record per userId (no nesting -- unlike
 // conversations/client-profiles, there's exactly one of these per agent, so
 // the userId itself is the key). Phase 3's only field today is

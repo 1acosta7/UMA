@@ -21,10 +21,14 @@ import crypto from "node:crypto";
 // carrier is part of what's "correct" here, and that now genuinely depends
 // on who's asking. licensedCarriers is folded into the cache key below for
 // exactly this reason: different licensing scopes never collide on the same
-// entry, even for byte-identical client facts. Cached entries otherwise still
-// contain only structured medical/financial facts and the resulting
-// recommendation text, nothing about which specific agent or client
-// submitted it.
+// entry, even for byte-identical client facts. Same logic extends to Phase
+// 4's product-type filter (effectiveProductType below) -- a request scoped
+// to "Final Expense only" and an unfiltered request must never share a
+// cache entry either, even for byte-identical intake text, since the actual
+// retrieved document set (and therefore what "correct" means) differs.
+// Cached entries otherwise still contain only structured medical/financial
+// facts and the resulting recommendation text, nothing about which specific
+// agent or client submitted it.
 
 // One combined hash over every carrier's ingestion state, not a hash per
 // carrier -- a recommendation compares across all four carriers together,
@@ -124,7 +128,7 @@ function normDiagnoses(rawArr) {
 // collide. Missing fields are represented as null (not omitted), so "field
 // present but empty" and "field never asked about" can't accidentally hash
 // the same.
-export function buildIntakeCacheKey(intake, versionHash, licensedCarriers) {
+export function buildIntakeCacheKey(intake, versionHash, licensedCarriers, effectiveProductType) {
   const norm = normText;
   const normList = (arr) => coerceToArray(arr).map(norm).filter(Boolean).sort();
 
@@ -141,6 +145,12 @@ export function buildIntakeCacheKey(intake, versionHash, licensedCarriers) {
     coverageAmount: intake?.coverageAmount ?? null,
     productObjective: norm(intake?.productObjective) ?? null,
     guidelineVersionHash: versionHash,
+    // Phase 4: the RESOLVED product-type filter (explicit selection or
+    // inferred from productObjective), not just productObjective itself --
+    // an explicit UI override is information productObjective alone doesn't
+    // capture, and two requests that resolve to different product-type
+    // filters must never share a cache entry even with identical intake text.
+    effectiveProductType: effectiveProductType || null,
     // Sorted so licensing order never matters, only the actual set does.
     licensedCarriers: [...new Set(licensedCarriers || [])].sort(),
   });

@@ -7,6 +7,7 @@ import {
   loadConversation, saveConversation, logAccess, readAccessLog,
   CARRIERS, CARRIER_NAMES, SLOT_LABELS, saveRecommendation,
   createClientProfile, addConversationToClientProfile, getUserSettings,
+  PRODUCT_TYPES, docMatchesProductType, mapProductObjectiveToType,
 } from "./_shared.mjs";
 import { crossCheckBuild, crossCheckA1C, crossCheckPSA } from "./_lookup.mjs";
 import { computeGuidelineVersionHash, buildIntakeCacheKey, getCachedRecommendation, saveCachedRecommendation } from "./_cache.mjs";
@@ -342,7 +343,7 @@ If the client is age 60+ or has multiple significant impairments, also run one s
 
 Stop once every carrier with guidelines uploaded has been searched for every condition/medication/lab value in the case, or after 16 searches, whichever comes first. Do not pad the search count once coverage is complete.`;
 
-async function researchNarrativeGuidance(anthropic, openai, supabase, queryText, carriersWithGuidelines) {
+async function researchNarrativeGuidance(anthropic, openai, supabase, queryText, carriersWithGuidelines, effectiveProductType = null) {
   if (carriersWithGuidelines.length === 0) return [];
 
   const tool = {
@@ -406,7 +407,15 @@ async function researchNarrativeGuidance(anthropic, openai, supabase, queryText,
         const embRes = await openai.embeddings.create({ model: EMBEDDING_MODEL, input: [query] });
         const embedding = embRes.data[0].embedding;
         const { data } = await supabase.rpc("match_guideline_chunks", { query_embedding: embedding, match_carrier: carrier, match_count: 4 });
-        const hits = (data || []).map((m) => ({ ...m, carrier }));
+        // Product-type gate (Phase 4), applied to narrative search results the
+        // same way it's applied to native-PDF candidate slots above: a
+        // wrong-product-type chunk is dropped here, before it's ever added to
+        // `collected` or shown to the research model as a tool result -- not
+        // filtered out of the final answer afterward. Cross-cutting slots
+        // always pass, same as the native-PDF side.
+        const hits = (data || [])
+          .map((m) => ({ ...m, carrier }))
+          .filter((m) => docMatchesProductType(carrier, m.slot_id, effectiveProductType));
         for (const m of hits) {
           const key = dedupeKey(m.carrier, m);
           if (seen.has(key)) continue;
@@ -478,7 +487,7 @@ function formatNarrativeBlocks(allChunks, carriersWithGuidelines) {
 // -- the streaming path runs this INSIDE the stream's start() callback (see
 // below) so the response opens and a heartbeat starts before any of this
 // work begins, instead of after.
-async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, conversationId, message }) {
+async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, conversationId, message, explicitProductType }) {
   let record = await loadConversation(convStore, userId, conversationId);
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);
 
@@ -497,6 +506,17 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
   const licensedCarriers = (userSettings?.licensedCarriers && userSettings.licensedCarriers.length)
     ? CARRIERS.filter((c) => userSettings.licensedCarriers.includes(c))
     : CARRIERS.slice();
+
+  // Product-type gate (Phase 4): the explicit UI selection wins if the agent
+  // set one. Otherwise, on a fresh (non-follow-up, no-client-docs) turn, it's
+  // inferred from the same intake extraction already run for the cache key
+  // below -- no extra model call. Follow-ups and client-doc-attached turns
+  // don't auto-infer (a follow-up is usually a short answer, not a case
+  // restatement, and the intake extraction is skipped entirely when client
+  // docs are attached) -- only the explicit selector drives filtering there.
+  // null means unfiltered: every product-type bucket matches, same
+  // (deliberately) as an agent who hasn't touched the selector at all.
+  let effectiveProductType = (explicitProductType && PRODUCT_TYPES.includes(explicitProductType)) ? explicitProductType : null;
 
   let contentBlocks, tableStatus, narrativeStatus, mergedStatus, messages, selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord;
   let cacheKey = null;
@@ -530,13 +550,16 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
       if (hasClientDocs) throw new Error("client documents attached -- skip cache");
       const intake = await extractClientIntake(anthropic, message);
       intakeForDebug = intake; // surfaced via debug:true only, for diagnosing cache-key instability
+      // Auto-infer product type from the same extraction, only if the agent
+      // didn't already pick one explicitly -- see comment above.
+      if (!effectiveProductType) effectiveProductType = mapProductObjectiveToType(intake?.productObjective);
       const versionHash = await computeGuidelineVersionHash(supabase);
-      cacheKey = buildIntakeCacheKey(intake, versionHash, licensedCarriers);
+      cacheKey = buildIntakeCacheKey(intake, versionHash, licensedCarriers, effectiveProductType);
       const cached = await getCachedRecommendation(cacheKey);
       if (cached) {
         return {
           record: record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [] },
-          isFollowUp: false, cacheHit: true, cacheKey, intakeForDebug, licensedCarriers,
+          isFollowUp: false, cacheHit: true, cacheKey, intakeForDebug, licensedCarriers, effectiveProductType,
           cachedReplyText: cached.replyText,
           cachedRecommendation: cached.recommendation || null,
           tableStatus: cached.tableStatus || {}, narrativeStatus: cached.narrativeStatus || {},
@@ -573,7 +596,21 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
         tableStatus[carrier] = "none";
         continue;
       }
-      const slotKeys = allKeys.filter((k) => k.startsWith(`${carrier}_`));
+      let slotKeys = allKeys.filter((k) => k.startsWith(`${carrier}_`));
+      // Product-type gate (Phase 4): applied here too, at candidate-set
+      // construction, so triage's own docs list literally cannot contain a
+      // wrong-product-type document -- not a prompt instruction it's trusted
+      // to follow, the same enforcement posture as the licensing filter
+      // above. Cross-cutting documents (general/master UW guides, APS
+      // ordering rules, financial UW, foreign-national eligibility, etc.)
+      // always pass regardless of the filter, per docMatchesProductType.
+      // If a carrier's uploaded docs all fail the filter (e.g. F&G, which
+      // only has IUL/cross-cutting documents, under a "Final Expense"
+      // filter), it collapses to the same "none" state as no docs at all --
+      // the practical effect on retrieval is identical either way.
+      if (effectiveProductType) {
+        slotKeys = slotKeys.filter((k) => docMatchesProductType(carrier, k.slice(carrier.length + 1), effectiveProductType));
+      }
       if (slotKeys.length === 0) {
         tableStatus[carrier] = "none";
         continue;
@@ -641,7 +678,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
     if (supabase && openai) {
       try {
         const guidedCarriers = await carriersWithNarrativeGuidelines(supabase, licensedCarriers);
-        allChunks = await researchNarrativeGuidance(anthropic, openai, supabase, message, guidedCarriers);
+        allChunks = await researchNarrativeGuidance(anthropic, openai, supabase, message, guidedCarriers, effectiveProductType);
         const { contentBlocks: narrativeBlocks, narrativeStatus: nStatus } = formatNarrativeBlocks(allChunks, guidedCarriers);
         narrativeStatus = nStatus;
         contentBlocks.push(...narrativeBlocks);
@@ -679,7 +716,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
         // the very next message (follow-up or not) reflects it.
         const guidedCarriers = await carriersWithNarrativeGuidelines(supabase, licensedCarriers);
         const researchQuery = `${record.profileText}\n\nNEW INFORMATION FROM A FOLLOW-UP MESSAGE: ${message}`;
-        const found = await researchNarrativeGuidance(anthropic, openai, supabase, researchQuery, guidedCarriers);
+        const found = await researchNarrativeGuidance(anthropic, openai, supabase, researchQuery, guidedCarriers, effectiveProductType);
         const newChunks = found.filter((m) => !priorKeys.has(dedupeKey(m.carrier, m)));
         allChunks = [...priorChunks, ...newChunks];
         const { contentBlocks: narrativeBlocks, narrativeStatus: nStatus } = formatNarrativeBlocks(allChunks, guidedCarriers);
@@ -727,7 +764,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
 
   return {
     record, isFollowUp, cacheHit: false, cacheKey, intakeForDebug, tableStatus, narrativeStatus, mergedStatus, messages,
-    selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord, licensedCarriers,
+    selectedForRecord, tierForRecord, clientDocKeysForRecord, narrativeChunksForRecord, licensedCarriers, effectiveProductType,
   };
 }
 
@@ -948,7 +985,7 @@ export default async function handler(req) {
 
   if (req.method !== "POST") return jsonError(405, "Method not allowed");
 
-  const { conversationId, message, debug, clientProfileId: incomingClientProfileId } = await req.json();
+  const { conversationId, message, debug, clientProfileId: incomingClientProfileId, productType } = await req.json();
   if (!conversationId) return jsonError(400, "conversationId is required");
   if (!message?.trim()) return jsonError(400, "message is required");
 
@@ -963,7 +1000,11 @@ export default async function handler(req) {
     openai = new OpenAI({ apiKey: Netlify.env.get("OPENAI_API_KEY") });
   } catch { /* narrative research degrades to "none" below if these are unavailable */ }
 
-  const ctxArgs = { anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, conversationId, message };
+  // Phase 4: optional explicit product-type filter from the UI selector.
+  // Passed straight through as-is (buildAnalysisContext validates it against
+  // PRODUCT_TYPES) -- an invalid/unrecognized value is treated the same as
+  // not sending one at all (falls back to auto-inference from intake).
+  const ctxArgs = { anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, conversationId, message, explicitProductType: productType || null };
 
   if (debug) {
     const ctx = await buildAnalysisContext(ctxArgs);
@@ -980,6 +1021,9 @@ export default async function handler(req) {
       cacheHit: !!ctx.cacheHit, cacheKey: ctx.cacheKey ?? null, intake: ctx.intakeForDebug ?? null,
       // Phase 3: the licensed-carrier set actually applied to this request.
       licensedCarriers: ctx.licensedCarriers ?? null,
+      // Phase 4: the resolved product-type filter actually applied (explicit
+      // selection or inferred from intake) -- null means unfiltered.
+      effectiveProductType: ctx.effectiveProductType ?? null,
     }), { status: 200, headers: { ...CORS, "Content-Type": "application/json" } });
   }
 
