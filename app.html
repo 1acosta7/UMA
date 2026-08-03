@@ -497,6 +497,17 @@
             <button class="sbtn" id="backfill-run-btn" onclick="runBackfill(false)"><i class="ti ti-database-import"></i> Run backfill</button>
           </div>
         </div>
+
+        <div class="setup-hd" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
+          <div>
+            <h2>Organization</h2>
+            <p>Optional -- solo agents can ignore this entirely and keep working exactly as before. Create an agency organization to invite other agents under their own individual logins; each agent's clients, conversations, and recommendations stay private to them by default, with no automatic visibility for org admins.</p>
+          </div>
+        </div>
+        <div id="org-switcher-mount" style="margin-bottom:1rem"></div>
+        <button class="sbtn" id="org-create-toggle-btn" onclick="toggleCreateOrg()"><i class="ti ti-building-plus"></i> Create an organization</button>
+        <div id="org-create-mount" style="display:none;margin-top:1rem"></div>
+        <div id="org-profile-mount" style="margin-top:1rem"></div>
       </div>
     </div>
   </div>
@@ -555,6 +566,7 @@ function initApp(clerk) {
   document.getElementById('avatar').textContent = first[0].toUpperCase();
   document.getElementById('auth-screen').style.display = 'none';
   checkOnboarding();
+  if (clerk.organization) syncOrgMembership(); // agent already has an active org on this device/session -- keep org-members fresh without requiring a Setup-tab visit
 }
 
 // Phase 3: first-login gate. licensedCarriers === null means the agent has
@@ -659,7 +671,69 @@ function switchTab(t) {
   if (t === "setup") {
     renderLicensedCarriersEditor(); // no PIN needed -- this is the agent's own licensing, not admin document management
     pin ? loadDocs() : showPin();
+    mountOrgUI();
   }
+}
+
+// Org signup flow, built entirely on Clerk's own prebuilt components (same
+// approach login.html already uses for mountSignIn) rather than hand-rolled
+// invite forms -- Clerk owns the actual org/membership/invite objects, we
+// only mirror the result into org-members (see sync-org-membership.mjs).
+// Mounted lazily on first visit to the Setup tab, not at page load, since
+// most agents are solo and will never open this section.
+let orgUIMounted = false;
+
+function mountOrgUI() {
+  if (!_clerk) return;
+  if (!orgUIMounted) {
+    orgUIMounted = true;
+    try {
+      _clerk.mountOrganizationSwitcher(document.getElementById('org-switcher-mount'), {
+        hidePersonal: false,
+      });
+    } catch { /* Organizations not enabled for this instance -- leave the section quietly empty rather than erroring the whole Setup tab */ }
+    _clerk.addListener(() => { syncOrgMembership(); renderOrgProfile(); });
+  }
+  renderOrgProfile();
+  syncOrgMembership();
+}
+
+function toggleCreateOrg() {
+  const el = document.getElementById('org-create-mount');
+  const showing = el.style.display !== 'none';
+  el.style.display = showing ? 'none' : 'block';
+  if (!showing && !el.dataset.mounted) {
+    el.dataset.mounted = '1';
+    try {
+      _clerk.mountCreateOrganization(el);
+    } catch { toast('Could not load organization creation', 'err'); }
+  }
+}
+
+// Admin invite/member-management UI is entirely Clerk's own OrganizationProfile
+// component -- re-mounted only when the active org actually changes (tracked
+// via dataset.mounted), not on every tab switch or listener tick.
+function renderOrgProfile() {
+  const el = document.getElementById('org-profile-mount');
+  if (!el || !_clerk) return;
+  if (!_clerk.organization) { el.innerHTML = ''; el.dataset.mounted = ''; return; }
+  if (el.dataset.mounted === _clerk.organization.id) return;
+  el.innerHTML = '';
+  el.dataset.mounted = _clerk.organization.id;
+  try {
+    _clerk.mountOrganizationProfile(el);
+  } catch { /* leave empty on failure */ }
+}
+
+// Mirrors the currently-active org (if any) into our own org-members store.
+// A no-op for the vast majority of agents who are solo and have no active
+// org -- sync-org-membership.mjs itself treats that as the normal case, not
+// an error.
+async function syncOrgMembership() {
+  try {
+    const tk = await token();
+    await fetch('/.netlify/functions/sync-org-membership', { method: 'POST', headers: { 'Authorization': `Bearer ${tk}` } });
+  } catch { /* best-effort -- never block the agent's actual work on this */ }
 }
 
 function resize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,150)+'px'; }

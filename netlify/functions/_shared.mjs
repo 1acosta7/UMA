@@ -7,17 +7,42 @@ export const CORS = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
+// Full decoded auth context: userId plus org-scoped claims (all null for an
+// agent not currently active in any organization -- Clerk's "membership
+// optional" mode means this is the normal, unremarkable case for every
+// existing solo agent, not an error state). userId remains the ONLY
+// partition key for every existing store (conversations, client-profiles,
+// client-docs, recommendations, user-settings) -- orgId is metadata stamped
+// onto NEW records going forward (see createClientProfile, chat.mjs), never
+// a second key component, so a solo agent's data path is byte-for-byte what
+// it was before orgId existed.
+export async function requireUserContext(authHeader) {
+  const token = (authHeader || "").replace("Bearer ", "").trim();
+  if (!token) throw new Error("Missing token");
+  const claims = await verifyToken(token, { secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
+  if (!claims?.sub) throw new Error("Invalid token");
+  const ctx = {
+    userId: claims.sub,
+    orgId: claims.org_id || null,
+    orgRole: claims.org_role || null,
+    sessionId: claims.sid || null,
+  };
+  // Best-effort, never allowed to affect the actual auth result -- see
+  // checkConcurrentSession's own comment for why this can't be a hard lock.
+  await checkConcurrentSession(ctx.userId, ctx.sessionId);
+  return ctx;
+}
+
 // Verifies the Clerk session token and returns the authenticated user's ID
 // (the JWT's `sub` claim). Every conversation/client-doc key is namespaced
 // by this value, and every read checks the requested key actually belongs
 // to the caller -- this is what makes one agent's archived clients
 // structurally unreadable by another agent, not just policy-enforced.
+// Every existing caller of this function is completely unaffected by the
+// org/concurrent-session additions above -- same signature, same return
+// type, same errors.
 export async function requireUser(authHeader) {
-  const token = (authHeader || "").replace("Bearer ", "").trim();
-  if (!token) throw new Error("Missing token");
-  const claims = await verifyToken(token, { secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
-  if (!claims?.sub) throw new Error("Invalid token");
-  return claims.sub;
+  return (await requireUserContext(authHeader)).userId;
 }
 
 export function jsonError(status, error) {
@@ -187,6 +212,54 @@ export async function saveUserSettings(userId, patch) {
   return record;
 }
 
+// Agency/per-seat accounts, layered on top of Clerk Organizations. Clerk
+// owns the actual org/membership/invite/role objects -- this store is our
+// own materialized view of "who's an active seat in which org," built up
+// lazily via sync-org-membership.mjs (called from the frontend whenever an
+// agent has an active org selected) rather than via a Clerk webhook, since
+// the data model is all that's needed for now (billing/seat-limit
+// enforcement is future work). Keyed `${orgId}/${userId}` -- deliberately
+// the reverse of every other store's `${userId}/...` shape, since this is
+// the one store meant to be listed BY org, not by agent.
+export function orgMemberKey(orgId, userId) {
+  return `${orgId}/${userId}`;
+}
+
+export async function loadOrgMember(orgId, userId) {
+  const store = getStore({ name: "org-members", consistency: "strong" });
+  try {
+    const text = await store.get(orgMemberKey(orgId, userId), { type: "text" });
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function upsertOrgMember(orgId, userId, patch) {
+  const store = getStore({ name: "org-members", consistency: "strong" });
+  const existing = await loadOrgMember(orgId, userId);
+  const now = new Date().toISOString();
+  const record = { role: "org:member", ...existing, ...patch, orgId, userId, updatedAt: now, joinedAt: existing?.joinedAt || now };
+  await store.set(orgMemberKey(orgId, userId), JSON.stringify(record), {
+    metadata: { orgId, userId, role: record.role },
+  });
+  return record;
+}
+
+// Active seat count for an org is simply this list's length -- no separate
+// mutable counter to keep in sync (and no double-count/drift risk), since
+// membership itself is the thing being counted.
+export async function listOrgMembers(orgId) {
+  const store = getStore({ name: "org-members", consistency: "strong" });
+  try {
+    const { blobs } = await store.list({ prefix: `${orgId}/` });
+    const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));
+    return entries.filter(Boolean).map((t) => JSON.parse(t));
+  } catch {
+    return [];
+  }
+}
+
 export function conversationKey(userId, conversationId) {
   return `${userId}/${conversationId}`;
 }
@@ -202,13 +275,18 @@ export function clientProfileKey(userId, clientProfileId) {
   return `${userId}/${clientProfileId}`;
 }
 
-export async function createClientProfile(userId, label, initialConversationId) {
+// orgId defaults to null so every pre-existing caller (and any future one
+// that doesn't care about orgs) is unaffected -- it's stamped onto the
+// profile at creation time only; there is no backfill of profiles created
+// before an agent joined an org.
+export async function createClientProfile(userId, label, initialConversationId, orgId = null) {
   const store = getStore({ name: "client-profiles", consistency: "strong" });
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const profile = {
     id, userId, label: label || "Untitled client", createdAt: now, updatedAt: now,
     conversationIds: initialConversationId ? [initialConversationId] : [],
+    orgId: orgId || null,
   };
   await store.set(clientProfileKey(userId, id), JSON.stringify(profile), {
     metadata: { userId, label: profile.label, updatedAt: now },
@@ -321,6 +399,61 @@ export async function readAccessLog(userId, conversationId) {
   } catch {
     return [];
   }
+}
+
+// Mirrors logAccess's shape exactly (own dedicated store, blind unique-keyed
+// write, swallow-and-never-block on failure) but for account-level security
+// events like concurrent-session flags -- these aren't scoped to a single
+// conversation the way logAccess's ${userId}/${conversationId}/... prefix
+// assumes, so they get their own store rather than being force-fit into that
+// one. No admin dashboard reads this yet -- readSecurityEvents exists so one
+// can, later, without changing how events are written.
+export async function logSecurityEvent(userId, event, details) {
+  const store = getStore({ name: "security-events", consistency: "strong" });
+  const key = `${userId}/${Date.now()}-${crypto.randomUUID()}`;
+  try {
+    await store.set(key, JSON.stringify({ userId, event, details, timestamp: new Date().toISOString() }));
+  } catch { /* security logging must never block the underlying operation */ }
+}
+
+export async function readSecurityEvents(userId) {
+  const store = getStore({ name: "security-events", consistency: "strong" });
+  try {
+    const { blobs } = await store.list({ prefix: `${userId}/` });
+    const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));
+    return entries.filter(Boolean).map((t) => JSON.parse(t)).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  } catch {
+    return [];
+  }
+}
+
+const CONCURRENT_SESSION_WINDOW_MS = 5 * 60 * 1000;
+
+// Soft alert, not a lock: this is a best-effort pointer comparison, not a
+// mutex, so two truly-simultaneous requests can both read the "previous"
+// pointer before either writes theirs and miss flagging each other -- an
+// acceptable gap for a soft alert meant to catch sustained multi-device use
+// (someone logged in on a laptop AND a phone at the same time), not to serve
+// as an auth control. Runs inside requireUserContext (and therefore inside
+// every requireUser call, since requireUser delegates to it), so this fires
+// on every authenticated request app-wide with zero changes needed to any
+// individual endpoint file -- and it can never throw out to the caller,
+// since a security-logging failure must never take down the actual request.
+async function checkConcurrentSession(userId, sessionId) {
+  if (!sessionId) return;
+  const store = getStore({ name: "session-activity", consistency: "strong" });
+  try {
+    const text = await store.get(userId, { type: "text" });
+    const prev = text ? JSON.parse(text) : null;
+    const now = Date.now();
+    if (prev && prev.sessionId !== sessionId && now - Date.parse(prev.lastSeenAt) < CONCURRENT_SESSION_WINDOW_MS) {
+      await logSecurityEvent(userId, "concurrent_session", {
+        previousSessionId: prev.sessionId,
+        newSessionId: sessionId,
+      });
+    }
+    await store.set(userId, JSON.stringify({ sessionId, lastSeenAt: new Date(now).toISOString() }));
+  } catch { /* never block auth on this */ }
 }
 
 // Structured, machine-readable recommendation records -- one per analysis

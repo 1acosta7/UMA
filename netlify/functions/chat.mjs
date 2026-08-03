@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { createClient } from "@supabase/supabase-js";
 import {
-  CORS, jsonError, requireUser, looksLikePdf, clientDocPrefix,
+  CORS, jsonError, requireUserContext, looksLikePdf, clientDocPrefix,
   loadConversation, saveConversation, logAccess, readAccessLog,
   CARRIERS, CARRIER_NAMES, SLOT_LABELS, saveRecommendation,
   createClientProfile, addConversationToClientProfile, getUserSettings,
@@ -487,7 +487,7 @@ function formatNarrativeBlocks(allChunks, carriersWithGuidelines) {
 // -- the streaming path runs this INSIDE the stream's start() callback (see
 // below) so the response opens and a heartbeat starts before any of this
 // work begins, instead of after.
-async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, conversationId, message, explicitProductType }) {
+async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, orgId, conversationId, message, explicitProductType }) {
   let record = await loadConversation(convStore, userId, conversationId);
   const isFollowUp = !!(record && record.turns && record.turns.length > 0);
 
@@ -558,7 +558,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
       const cached = await getCachedRecommendation(cacheKey);
       if (cached) {
         return {
-          record: record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [] },
+          record: record || { id: conversationId, userId, orgId: orgId || null, createdAt: new Date().toISOString(), turns: [] },
           isFollowUp: false, cacheHit: true, cacheKey, intakeForDebug, licensedCarriers, effectiveProductType,
           cachedReplyText: cached.replyText,
           cachedRecommendation: cached.recommendation || null,
@@ -694,7 +694,7 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
 
     messages = [{ role: "user", content: [...contentBlocks, { type: "text", text: message }] }];
 
-    record = record || { id: conversationId, userId, createdAt: new Date().toISOString(), turns: [] };
+    record = record || { id: conversationId, userId, orgId: orgId || null, createdAt: new Date().toISOString(), turns: [] };
   } else {
     // ---- Follow-up: reconstruct the established thread, but re-research ----
     tableStatus = { ...record.tableStatus };
@@ -976,9 +976,11 @@ function runNumericCrossCheck(structured, ageYears) {
 export default async function handler(req) {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
-  let userId;
+  let userId, orgId;
   try {
-    userId = await requireUser(req.headers.get("authorization"));
+    const ctx = await requireUserContext(req.headers.get("authorization"));
+    userId = ctx.userId;
+    orgId = ctx.orgId;
   } catch {
     return jsonError(401, "Unauthorized");
   }
@@ -1004,7 +1006,7 @@ export default async function handler(req) {
   // Passed straight through as-is (buildAnalysisContext validates it against
   // PRODUCT_TYPES) -- an invalid/unrecognized value is treated the same as
   // not sending one at all (falls back to auto-inference from intake).
-  const ctxArgs = { anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, conversationId, message, explicitProductType: productType || null };
+  const ctxArgs = { anthropic, supabase, openai, carrierStore, clientStore, convStore, userId, orgId, conversationId, message, explicitProductType: productType || null };
 
   if (debug) {
     const ctx = await buildAnalysisContext(ctxArgs);
@@ -1172,7 +1174,7 @@ export default async function handler(req) {
               }
             }
             if (!resolvedProfileId) {
-              const profile = await createClientProfile(userId, record.label, conversationId);
+              const profile = await createClientProfile(userId, record.label, conversationId, orgId);
               resolvedProfileId = profile.id;
             }
             record.clientProfileId = resolvedProfileId;
