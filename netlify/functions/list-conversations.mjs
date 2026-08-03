@@ -28,6 +28,7 @@ export default async function handler(req) {
       // Skip stub records that only exist because a client doc was uploaded
       // before analysis ever ran -- nothing to show in the sidebar yet.
       if (!record.turns || record.turns.length === 0) continue;
+      if (record.deleted) continue;
       items.push({
         id: record.id,
         label: record.label || "Untitled client",

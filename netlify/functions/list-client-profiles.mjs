@@ -26,6 +26,7 @@ export default async function handler(req) {
       // never run) -- matches list-conversations.mjs's existing rule that
       // there's nothing to show in the sidebar for those yet.
       if (!record || !record.turns || record.turns.length === 0) return null;
+      if (record.deleted) return null;
       return { id: record.id, label: record.label || "Untitled", createdAt: record.createdAt, updatedAt: record.updatedAt };
     }));
     const validConversations = conversations.filter(Boolean).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));

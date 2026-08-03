@@ -257,6 +257,26 @@ export async function addConversationToClientProfile(userId, clientProfileId, co
   return profile;
 }
 
+// Mirror of addConversationToClientProfile for the delete path -- trims the
+// conversationId out of the profile's active list without touching the
+// profile record itself, even down to zero remaining conversations. The
+// profile is the durable client identity; it must survive every one of its
+// conversations being deleted, not just most of them.
+export async function removeConversationFromClientProfile(userId, clientProfileId, conversationId) {
+  const store = getStore({ name: "client-profiles", consistency: "strong" });
+  const profile = await loadClientProfile(userId, clientProfileId);
+  if (!profile) throw new Error("Client profile not found");
+  if (profile.userId !== userId) throw new Error("Client profile does not belong to this agent");
+  if (profile.conversationIds.includes(conversationId)) {
+    profile.conversationIds = profile.conversationIds.filter((id) => id !== conversationId);
+    profile.updatedAt = new Date().toISOString();
+    await store.set(clientProfileKey(userId, clientProfileId), JSON.stringify(profile), {
+      metadata: { userId, label: profile.label, updatedAt: profile.updatedAt },
+    });
+  }
+  return profile;
+}
+
 export function clientDocPrefix(userId, conversationId) {
   return `${userId}/${conversationId}/`;
 }
