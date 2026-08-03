@@ -157,9 +157,16 @@
       overflow: hidden; transition: margin-left .2s;
     }
     .sidebar.collapsed { margin-left: -250px; }
-    .sidebar-hd { padding: .9rem; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .sidebar-hd { padding: .9rem; border-bottom: 1px solid var(--border); flex-shrink: 0; display: flex; gap: .5rem; align-items: center; }
+    .sidebar-close-btn {
+      flex-shrink: 0; width: 32px; height: 32px; border-radius: 8px; border: none;
+      background: transparent; color: var(--muted); cursor: pointer; display: flex;
+      align-items: center; justify-content: center; font-size: 1rem; transition: all .15s;
+    }
+    .sidebar-close-btn:hover { color: var(--text); background: rgba(255,255,255,.06); }
+    .sidebar-backdrop { display: none; }
     .new-client-btn {
-      width: 100%; display: flex; align-items: center; justify-content: center; gap: .4rem;
+      flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; gap: .4rem;
       padding: .55rem; border-radius: 8px; background: var(--accent); border: none;
       color: #fff; font-size: .84rem; font-weight: 700; cursor: pointer; transition: background .15s;
     }
@@ -185,13 +192,12 @@
     }
     .conv-del-btn:hover { color: #E85D2F; background: rgba(232,93,47,.1); }
     .chat-col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-    .sidebar-toggle { display: none; }
     @media (max-width: 820px) {
       .sidebar { position: fixed; top: var(--hh); bottom: 0; left: 0; z-index: 40;
         box-shadow: 8px 0 24px rgba(0,0,0,.3); margin-left: -250px; }
       .sidebar.open { margin-left: 0; }
-      .sidebar.collapsed { margin-left: -250px; }
-      .sidebar-toggle { display: inline-flex; }
+      .sidebar-backdrop { position: fixed; inset: var(--hh) 0 0 0; z-index: 39; background: rgba(0,0,0,.45); }
+      .sidebar.open ~ .sidebar-backdrop { display: block; }
     }
     .doc-chips { display: flex; flex-wrap: wrap; gap: .35rem; margin-bottom: .5rem; }
     .doc-chips:empty { display: none; margin-bottom: 0; }
@@ -422,11 +428,13 @@
       <div class="sidebar" id="sidebar">
         <div class="sidebar-hd">
           <button class="new-client-btn" onclick="newClientProfile()"><i class="ti ti-plus"></i> New Client Profile</button>
+          <button class="sidebar-close-btn" onclick="toggleSidebar()" title="Close"><i class="ti ti-x"></i></button>
         </div>
         <div class="conv-list" id="conv-list">
           <div class="conv-empty">No past clients yet</div>
         </div>
       </div>
+      <div class="sidebar-backdrop" id="sidebar-backdrop" onclick="toggleSidebar()"></div>
       <div class="chat-col">
         <div class="messages" id="messages">
           <div class="empty" id="empty">
@@ -742,7 +750,15 @@ async function syncOrgMembership() {
 function resize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,150)+'px'; }
 function useEx(btn) { document.getElementById('chat-in').value=btn.textContent.trim(); document.getElementById('chat-in').focus(); }
 
-function toggleSidebar() { document.getElementById('sidebar').classList.toggle('open'); }
+// Below 820px the sidebar is a fixed overlay (see the media query) and toggles
+// via .open; at desktop widths it's a normal flex child whose space collapses
+// via .collapsed (negative margin cancels its flex-basis, letting chat-col
+// fill in) -- same button, same click handler, viewport decides which class
+// actually does anything since only one is ever styled at a given width.
+function toggleSidebar() {
+  const sidebar = document.getElementById('sidebar');
+  sidebar.classList.toggle(window.innerWidth <= 820 ? 'open' : 'collapsed');
+}
 
 const EMPTY_STATE_HTML = `
     <div class="empty" id="empty">
