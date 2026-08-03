@@ -690,6 +690,9 @@ function mountOrgUI() {
     try {
       _clerk.mountOrganizationSwitcher(document.getElementById('org-switcher-mount'), {
         hidePersonal: false,
+        afterSelectOrganizationUrl: '/app.html',
+        afterSelectPersonalUrl: '/app.html',
+        afterCreateOrganizationUrl: '/app.html',
       });
     } catch { /* Organizations not enabled for this instance -- leave the section quietly empty rather than erroring the whole Setup tab */ }
     _clerk.addListener(() => { syncOrgMembership(); renderOrgProfile(); });
@@ -705,7 +708,7 @@ function toggleCreateOrg() {
   if (!showing && !el.dataset.mounted) {
     el.dataset.mounted = '1';
     try {
-      _clerk.mountCreateOrganization(el);
+      _clerk.mountCreateOrganization(el, { afterCreateOrganizationUrl: '/app.html' });
     } catch { toast('Could not load organization creation', 'err'); }
   }
 }
@@ -721,7 +724,7 @@ function renderOrgProfile() {
   el.innerHTML = '';
   el.dataset.mounted = _clerk.organization.id;
   try {
-    _clerk.mountOrganizationProfile(el);
+    _clerk.mountOrganizationProfile(el, { afterLeaveOrganizationUrl: '/app.html' });
   } catch { /* leave empty on failure */ }
 }
 
