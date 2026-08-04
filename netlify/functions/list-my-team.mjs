@@ -32,7 +32,10 @@ export default async function handler(req) {
   }
 
   if (!ctx.orgId) {
-    return new Response(JSON.stringify({ directReports: [], isOrgAdmin: false, orgRoster: null }), {
+    return new Response(JSON.stringify({
+      directReports: [], isOrgAdmin: false, orgRoster: null,
+      _debugOrgRole: String(ctx.orgRole), _debugOrgId: String(ctx.orgId),
+    }), {
       status: 200, headers: { ...CORS, "Content-Type": "application/json" },
     });
   }
@@ -65,7 +68,10 @@ export default async function handler(req) {
   const directReports = withIdentity.filter((m) => m.reportsTo === ctx.userId);
   const orgRoster = isOrgAdmin ? withIdentity : null;
 
-  return new Response(JSON.stringify({ directReports, isOrgAdmin, orgRoster, _debugOrgRole: ctx.orgRole }), {
+  return new Response(JSON.stringify({
+    directReports, isOrgAdmin, orgRoster,
+    _debugOrgRole: String(ctx.orgRole), _debugOrgId: String(ctx.orgId),
+  }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },
   });
 }
