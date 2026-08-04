@@ -550,6 +550,14 @@
         </div>
         <div id="user-profile-mount"></div>
 
+        <div class="setup-hd" id="billing-hd" style="display:none;margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
+          <div>
+            <h2>Billing</h2>
+            <p>Manage your payment method, invoices, and plan from the Billing tab above, in your Clerk account. This shows your current status.</p>
+          </div>
+        </div>
+        <div id="billing-status"></div>
+
         <div class="setup-hd" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
           <div>
             <h2>Organization</h2>
@@ -796,6 +804,7 @@ function switchTab(t) {
     mountUserProfileUI();
     renderProductTypePreference();
     loadMyTeam();
+    loadBillingStatus();
   }
 }
 
@@ -981,6 +990,37 @@ async function assignReportsTo() {
     toast('Reporting structure updated', 'ok');
     loadMyTeam();
   } catch (err) { toast(err.message, 'err'); }
+}
+
+// Status-only display -- actual payment method/invoice/cancel management
+// lives in Clerk's own UserProfile component above (its Billing tab appears
+// automatically once a plan exists), not duplicated here. This just shows
+// the grace-period deadline in plain language, since that's specific to how
+// this app enforces access, not something Clerk's own UI knows about.
+async function loadBillingStatus() {
+  const hd = document.getElementById('billing-hd');
+  const wrap = document.getElementById('billing-status');
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/get-subscription-status', { headers: { 'Authorization': `Bearer ${tk}` } });
+    if (res.status === 401) { await doSignOut(); return; }
+    const j = await res.json();
+    if (j.isPlatformAdmin) { hd.style.display = 'none'; wrap.innerHTML = ''; return; }
+    hd.style.display = 'flex';
+
+    let html;
+    if (j.status === 'active') {
+      html = `<div class="activity-row"><div class="activity-title" style="color:var(--green)"><i class="ti ti-circle-check"></i> Active</div></div>`;
+    } else if (j.status === 'trialing') {
+      html = `<div class="activity-row"><div class="activity-title" style="color:var(--green)"><i class="ti ti-circle-check"></i> Free trial active</div></div>`;
+    } else if (j.status === 'past_due') {
+      const deadline = j.gracePeriodEndsAt ? new Date(j.gracePeriodEndsAt).toLocaleDateString() : 'soon';
+      html = `<div class="activity-row"><div class="activity-title" style="color:#E85D2F"><i class="ti ti-alert-triangle"></i> Payment issue</div><div class="activity-meta">Your last payment failed. Update your payment method above by ${esc(deadline)} to keep using Uma.</div></div>`;
+    } else {
+      html = `<div class="activity-row"><div class="activity-title" style="color:#E85D2F"><i class="ti ti-alert-triangle"></i> No active subscription</div></div>`;
+    }
+    wrap.innerHTML = html;
+  } catch { hd.style.display = 'none'; wrap.innerHTML = ''; }
 }
 
 function resize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,150)+'px'; }
@@ -1415,6 +1455,18 @@ async function send() {
       body: JSON.stringify({ conversationId, message: q, clientProfileId: activeClientProfileId, productType: productTypeVal }),
     });
     if (res.status === 401) { await doSignOut(); return; }
+    if (res.status === 402) {
+      const j = await res.json().catch(() => ({}));
+      const graceMsg = j.reason === 'past_due_grace_expired'
+        ? 'Your last payment failed and the grace period has ended.'
+        : j.reason === 'no_subscription'
+          ? "You don't have an active subscription yet."
+          : 'Your subscription is not currently active.';
+      bubble.innerHTML = `<span style="color:#E85D2F"><i class="ti ti-lock"></i> ${esc(graceMsg)} Update your billing in <a href="#" onclick="switchTab('settings');return false;" style="color:var(--accent)">Settings</a> to continue.</span>`;
+      streaming = false;
+      document.getElementById('send-btn').disabled = false;
+      return;
+    }
     if (!res.ok) throw new Error('Request failed');
 
     const reader = res.body.getReader();
