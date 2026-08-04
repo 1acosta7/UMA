@@ -1,4 +1,4 @@
-import { CORS, jsonError, requireUser, getUserSettings } from "./_shared.mjs";
+import { CORS, jsonError, requireUser, getUserSettings, isPlatformAdmin } from "./_shared.mjs";
 
 // Phase 3 (carrier licensing). licensedCarriers: null means the agent hasn't
 // completed onboarding yet (or the record doesn't exist) -- the frontend
@@ -18,6 +18,7 @@ export default async function handler(req) {
   return new Response(JSON.stringify({
     licensedCarriers: settings?.licensedCarriers || null,
     defaultProductType: settings?.defaultProductType || null,
+    isPlatformAdmin: isPlatformAdmin(userId),
   }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },
   });

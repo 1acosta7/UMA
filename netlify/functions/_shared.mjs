@@ -45,6 +45,31 @@ export async function requireUser(authHeader) {
   return (await requireUserContext(authHeader)).userId;
 }
 
+// Platform admin: the single site owner, hardcoded by Clerk userId --
+// deliberately NOT the same concept as org-admin (a per-agency Clerk
+// org:admin role any agent could hold via the org-accounts work). Controls
+// carrier document management, org provisioning, and site-wide settings.
+// Not tied to any Clerk org/role claim, so it stays true for this user
+// regardless of which org (if any) is currently active on their session.
+const PLATFORM_ADMIN_USER_IDS = new Set([
+  "user_3GtogBDihusq0B6YKO5UF84i1hu", // acosta.mathew94@gmail.com -- site owner
+]);
+
+export function isPlatformAdmin(userId) {
+  return PLATFORM_ADMIN_USER_IDS.has(userId);
+}
+
+// Throws (same shape as requireUserContext's own auth failures) if the
+// caller is authenticated but isn't the platform admin. Use this instead of
+// requireUserContext for endpoints that manage carrier documents, provision
+// organizations, or touch other site-wide settings -- never gate those on
+// orgRole, since an org:admin is scoped to their own agency, not the site.
+export async function requirePlatformAdmin(authHeader) {
+  const ctx = await requireUserContext(authHeader);
+  if (!isPlatformAdmin(ctx.userId)) throw new Error("Not platform admin");
+  return ctx;
+}
+
 export function jsonError(status, error) {
   return new Response(JSON.stringify({ error }), {
     status, headers: { ...CORS, "Content-Type": "application/json" },

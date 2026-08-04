@@ -1,6 +1,6 @@
 import { getStore } from "@netlify/blobs";
-import { verifyToken } from "@clerk/backend";
 import { createClient } from "@supabase/supabase-js";
+import { requirePlatformAdmin } from "./_shared.mjs";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -8,17 +8,16 @@ const CORS = {
   "Access-Control-Allow-Methods": "GET, OPTIONS",
 };
 
-async function checkAuth(authHeader) {
-  const token = (authHeader || "").replace("Bearer ", "").trim();
-  if (!token) throw new Error("Missing token");
-  await verifyToken(token, { secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
-}
-
 export default async function handler(req) {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
+  // Which carrier documents exist is content-management information, not
+  // agent-facing search -- previously this only checked for any valid Clerk
+  // session, which meant any logged-in agent could call this directly and
+  // see it without ever knowing the admin PIN. Now matches the Setup tab's
+  // platform-admin-only visibility.
   try {
-    await checkAuth(req.headers.get("authorization"));
+    await requirePlatformAdmin(req.headers.get("authorization"));
   } catch {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401, headers: { ...CORS, "Content-Type": "application/json" },

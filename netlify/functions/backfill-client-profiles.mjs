@@ -1,9 +1,9 @@
 import { getStore } from "@netlify/blobs";
-import { clientProfileKey } from "./_shared.mjs";
+import { clientProfileKey, requirePlatformAdmin } from "./_shared.mjs";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -24,7 +24,16 @@ export default async function handler(req) {
   }
 
   const { pin, dryRun } = await req.json();
+  // Two independent checks, both required -- see upload.mjs for why the PIN
+  // alone was never actually tied to any identity.
   if (!pin || pin !== Netlify.env.get("ADMIN_PIN")) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401, headers: { ...CORS, "Content-Type": "application/json" },
+    });
+  }
+  try {
+    await requirePlatformAdmin(req.headers.get("authorization"));
+  } catch {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401, headers: { ...CORS, "Content-Type": "application/json" },
     });

@@ -1,10 +1,10 @@
-import { SLOT_LABELS } from "./_shared.mjs";
+import { SLOT_LABELS, requirePlatformAdmin } from "./_shared.mjs";
 import { ingestCarrierDoc } from "./_ingest.mjs";
 import { runVerification } from "./_verify.mjs";
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
@@ -19,7 +19,18 @@ export default async function handler(req) {
 
   const { pin, carrier, slotId, data, filename } = await req.json();
 
+  // Two independent checks, both required: the PIN (unchanged from before)
+  // plus the caller actually being the platform admin's own Clerk session.
+  // The PIN alone previously had no identity behind it at all -- anyone who
+  // had it, logged in or not, could call this endpoint directly.
   if (!pin || pin !== Netlify.env.get("ADMIN_PIN")) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401, headers: { ...CORS, "Content-Type": "application/json" },
+    });
+  }
+  try {
+    await requirePlatformAdmin(req.headers.get("authorization"));
+  } catch {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401, headers: { ...CORS, "Content-Type": "application/json" },
     });
