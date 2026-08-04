@@ -92,6 +92,73 @@ export async function requirePlatformAdmin(authHeader) {
   return ctx;
 }
 
+// Per-agent subscription state, keyed by userId (one record per agent, same
+// shape as user-settings). This is OUR OWN materialized view, kept current
+// by clerk-billing-webhook.mjs -- not read from the session token's `pla`
+// claim directly. Two different jobs: the JWT claim is the fast per-request
+// "what plan is active right now" read; this store is what actually tracks
+// WHEN a payment first failed, which is the one thing a stateless claim
+// can't hold (a webhook is the only signal that fires exactly once, at the
+// moment of failure) -- and that's what the grace-period clock is built on.
+// status is one of: "active" | "trialing" | "past_due" | "canceled".
+export async function getSubscriptionStatus(userId) {
+  const store = getStore({ name: "subscription-status", consistency: "strong" });
+  try {
+    const text = await store.get(userId, { type: "text" });
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function setSubscriptionStatus(userId, patch) {
+  const store = getStore({ name: "subscription-status", consistency: "strong" });
+  const existing = (await getSubscriptionStatus(userId)) || { userId, createdAt: new Date().toISOString() };
+  const now = new Date().toISOString();
+  const record = { ...existing, ...patch, userId, updatedAt: now };
+  await store.set(userId, JSON.stringify(record), { metadata: { userId, status: record.status, updatedAt: now } });
+  return record;
+}
+
+const GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
+
+// The one gate for the underwriting pipeline. Platform admin bypasses
+// unconditionally -- no Stripe customer, no plan, never prompted, checked
+// first so it can never be caught by a stricter status check below. A
+// missing record (no subscription-status row at all) is treated the same
+// as a genuinely lapsed one: blocked, not grandfathered -- "every agent
+// pays individually" was the explicit ask, so an agent who's never
+// subscribed doesn't get a silent pass.
+//
+// past_due gets a 7-day grace period from the moment the FIRST failed
+// payment was recorded (pastDueSince), not from "now" on every check --
+// Stripe's own retry schedule gets that whole window to recover the
+// payment before the pipeline actually blocks. Recommended over a hard
+// lock on the first failure since a failed charge is often transient
+// (expired card, a bank flagging the charge, momentary insufficient
+// funds) and this is the one action in the app that actually delivers
+// value -- login, history, and Settings all stay reachable regardless.
+export async function hasActiveAccess(userId) {
+  if (isPlatformAdmin(userId)) return { allowed: true, reason: "platform_admin" };
+
+  const record = await getSubscriptionStatus(userId);
+  if (!record) return { allowed: false, reason: "no_subscription" };
+
+  if (record.status === "active" || record.status === "trialing") {
+    return { allowed: true, reason: record.status };
+  }
+
+  if (record.status === "past_due") {
+    const since = record.pastDueSince ? Date.parse(record.pastDueSince) : null;
+    if (since && Date.now() - since < GRACE_PERIOD_MS) {
+      return { allowed: true, reason: "past_due_grace_period" };
+    }
+    return { allowed: false, reason: "past_due_grace_expired" };
+  }
+
+  return { allowed: false, reason: record.status || "canceled" };
+}
+
 export function jsonError(status, error) {
   return new Response(JSON.stringify({ error }), {
     status, headers: { ...CORS, "Content-Type": "application/json" },

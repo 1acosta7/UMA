@@ -8,6 +8,7 @@ import {
   CARRIERS, CARRIER_NAMES, SLOT_LABELS, saveRecommendation,
   createClientProfile, addConversationToClientProfile, getUserSettings,
   PRODUCT_TYPES, docMatchesProductType, mapProductObjectiveToType,
+  hasActiveAccess,
 } from "./_shared.mjs";
 import { crossCheckBuild, crossCheckA1C, crossCheckPSA } from "./_lookup.mjs";
 import { computeGuidelineVersionHash, buildIntakeCacheKey, getCachedRecommendation, saveCachedRecommendation } from "./_cache.mjs";
@@ -1009,6 +1010,24 @@ export default async function handler(req) {
   }
 
   if (req.method !== "POST") return jsonError(405, "Method not allowed");
+
+  // Subscription gate for the actual underwriting pipeline -- everything
+  // else (login, conversation history, Settings) stays reachable regardless.
+  // BILLING_ENFORCEMENT_ENABLED defaults off/unset, so shipping this code
+  // doesn't change any live agent's access until it's deliberately flipped
+  // on -- there is no subscription-status data yet for any existing agent,
+  // and turning this on before that data exists would lock out the whole
+  // user base, not just agents who've actually lapsed. See hasActiveAccess
+  // in _shared.mjs for the platform-admin bypass and grace-period logic.
+  if (Netlify.env.get("BILLING_ENFORCEMENT_ENABLED") === "true") {
+    const access = await hasActiveAccess(userId);
+    if (!access.allowed) {
+      return new Response(JSON.stringify({
+        error: "Subscription required",
+        reason: access.reason,
+      }), { status: 402, headers: { ...CORS, "Content-Type": "application/json" } });
+    }
+  }
 
   const { conversationId, message, debug, clientProfileId: incomingClientProfileId, productType } = await req.json();
   if (!conversationId) return jsonError(400, "conversationId is required");
