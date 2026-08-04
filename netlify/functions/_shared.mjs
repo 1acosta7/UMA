@@ -480,6 +480,26 @@ export async function saveRecommendation(record) {
   return full;
 }
 
+// Every recommendation across every one of this agent's conversations, not
+// one thread -- for the Settings-panel activity view. Same store as
+// listRecommendations, just listed by the userId prefix alone rather than
+// userId+conversationId, since recommendationKey nests conversationId under
+// userId. Capped and newest-first: this is a glance-at-your-recent-activity
+// view, not a full export, and an agent with months of history shouldn't
+// pay for listing (and the frontend rendering) every record ever made.
+export async function listRecentRecommendationsForUser(userId, limit = 50) {
+  const store = getStore({ name: "recommendations", consistency: "strong" });
+  try {
+    const { blobs } = await store.list({ prefix: `${userId}/` });
+    const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));
+    return entries.filter(Boolean).map((t) => JSON.parse(t))
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
 export async function listRecommendations(userId, conversationId) {
   const store = getStore({ name: "recommendations", consistency: "strong" });
   try {

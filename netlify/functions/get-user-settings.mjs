@@ -15,7 +15,10 @@ export default async function handler(req) {
   }
 
   const settings = await getUserSettings(userId);
-  return new Response(JSON.stringify({ licensedCarriers: settings?.licensedCarriers || null }), {
+  return new Response(JSON.stringify({
+    licensedCarriers: settings?.licensedCarriers || null,
+    defaultProductType: settings?.defaultProductType || null,
+  }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },
   });
 }
