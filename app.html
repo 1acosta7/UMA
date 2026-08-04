@@ -483,7 +483,39 @@
 
     <div class="panel" id="panel-setup">
       <div class="setup-wrap">
-        <div class="setup-hd" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem">
+        <div class="setup-hd">
+          <div>
+            <h2>Organizations</h2>
+            <p>Provision a new agency. You'll be added as its admin so you can invite the agency's real first admin from the Organization section in Settings, then leave once handed off.</p>
+          </div>
+        </div>
+        <div style="display:flex;gap:.5rem;max-width:460px;margin-bottom:.5rem">
+          <input type="text" id="new-org-name" class="pin-in" style="margin-bottom:0" placeholder="Agency name" />
+          <button class="sbtn" id="create-org-btn" onclick="createOrganization()" style="flex-shrink:0"><i class="ti ti-building-plus"></i> Create</button>
+        </div>
+
+        <div class="setup-hd" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
+          <div>
+            <h2>Agents</h2>
+            <p>Every agent who has completed onboarding.</p>
+          </div>
+        </div>
+        <div id="agent-list">
+          <div class="load-row" style="padding:1rem 0"><div class="spin"></div> Loading…</div>
+        </div>
+
+        <div class="setup-hd" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
+          <div>
+            <h2>System Health</h2>
+            <p>Document indexing status plus basic record counts across the app.</p>
+          </div>
+          <button class="sbtn" id="refresh-health-btn" onclick="loadSystemHealth()" style="flex-shrink:0"><i class="ti ti-refresh"></i> Refresh</button>
+        </div>
+        <div id="system-health">
+          <div class="load-row" style="padding:1rem 0"><div class="spin"></div> Loading…</div>
+        </div>
+
+        <div class="setup-hd" style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
           <div>
             <h2>Document Management</h2>
             <p>Upload and manage underwriting guides. Changes apply immediately for all agents.</p>
@@ -526,6 +558,14 @@
         </div>
         <div id="org-switcher-mount" style="margin-bottom:1rem"></div>
         <div id="org-profile-mount" style="margin-top:1rem"></div>
+
+        <div class="setup-hd" id="my-team-hd" style="display:none;margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
+          <div>
+            <h2>My Team</h2>
+            <p>Roster only -- names, licensing, and activity for people who report to you. Their clients, conversations, and recommendations stay private to them, same as everyone else.</p>
+          </div>
+        </div>
+        <div id="my-team-content" style="display:none"></div>
 
         <div class="setup-hd" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
           <div>
@@ -748,13 +788,14 @@ function switchTab(t) {
     document.getElementById("panel-"+x)?.classList.toggle("active", x===t);
   });
   if (t === "setup") {
-    pin ? loadDocs() : showPin();
+    pin ? loadSetupTab() : showPin();
   }
   if (t === "settings") {
     renderLicensedCarriersEditor(); // no PIN needed -- this is the agent's own licensing, not admin document management
     mountOrgUI();
     mountUserProfileUI();
     renderProductTypePreference();
+    loadMyTeam();
   }
 }
 
@@ -874,6 +915,72 @@ async function syncOrgMembership() {
     const tk = await token();
     await fetch('/.netlify/functions/sync-org-membership', { method: 'POST', headers: { 'Authorization': `Bearer ${tk}` } });
   } catch { /* best-effort -- never block the agent's actual work on this */ }
+}
+
+// My Team is roster-only by design (see list-my-team.mjs) -- a reporting
+// line is an organizational fact, not a data-sharing grant. This section
+// stays hidden unless it's actually relevant: either you have direct
+// reports (roster view) or you're org:admin (reporting-structure control),
+// same fade-into-the-background treatment Organization gets for solo agents.
+async function loadMyTeam() {
+  const hd = document.getElementById('my-team-hd');
+  const wrap = document.getElementById('my-team-content');
+  if (!_clerk?.organization) { hd.style.display = 'none'; wrap.style.display = 'none'; return; }
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/list-my-team', { headers: { 'Authorization': `Bearer ${tk}` } });
+    if (res.status === 401) { await doSignOut(); return; }
+    const { directReports, isOrgAdmin, orgRoster } = await res.json();
+    if (!directReports.length && !isOrgAdmin) { hd.style.display = 'none'; wrap.style.display = 'none'; return; }
+    hd.style.display = 'flex'; wrap.style.display = 'block';
+
+    const rosterRow = (m) => `<div class="activity-row">
+      <div class="activity-title">${esc(m.name || m.email || m.userId)}</div>
+      <div class="activity-meta">${m.email ? esc(m.email) + ' — ' : ''}${m.licensedCarriers.map(c => esc(CARRIERS[c]?.name || c)).join(', ') || 'No carriers selected'}</div>
+      <div class="activity-meta">Last active: ${esc(m.lastActiveAt ? new Date(m.lastActiveAt).toLocaleString() : 'Never')}</div>
+    </div>`;
+
+    let html = '';
+    html += directReports.length
+      ? directReports.map(rosterRow).join('')
+      : '<div class="conv-empty">No one reports to you yet</div>';
+
+    if (isOrgAdmin) {
+      const opts = (list, blankLabel) => `<option value="">${esc(blankLabel)}</option>` +
+        list.map(m => `<option value="${esc(m.userId)}">${esc(m.name || m.email || m.userId)}</option>`).join('');
+      html += `
+        <div style="margin-top:1.5rem;padding-top:1rem;border-top:1px solid var(--border)">
+          <h4 style="font-size:.85rem;margin-bottom:.65rem">Manage reporting structure</h4>
+          <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+            <select class="product-type-select" id="reportsto-agent" style="max-width:220px">${opts(orgRoster, 'Agent…')}</select>
+            <span style="color:var(--muted);font-size:.85rem">reports to</span>
+            <select class="product-type-select" id="reportsto-manager" style="max-width:220px">${opts(orgRoster, 'No manager')}</select>
+            <button class="sbtn" onclick="assignReportsTo()"><i class="ti ti-device-floppy"></i> Save</button>
+          </div>
+        </div>`;
+    }
+    wrap.innerHTML = html;
+  } catch { hd.style.display = 'none'; wrap.style.display = 'none'; }
+}
+
+async function assignReportsTo() {
+  const targetUserId = document.getElementById('reportsto-agent').value;
+  const reportsTo = document.getElementById('reportsto-manager').value || null;
+  if (!targetUserId) { toast('Choose an agent', 'err'); return; }
+  if (targetUserId === reportsTo) { toast("An agent can't report to themselves", 'err'); return; }
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/set-reports-to', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
+      body: JSON.stringify({ targetUserId, reportsTo }),
+    });
+    if (res.status === 401) { await doSignOut(); return; }
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || 'Could not update reporting structure');
+    toast('Reporting structure updated', 'ok');
+    loadMyTeam();
+  } catch (err) { toast(err.message, 'err'); }
 }
 
 function resize(el) { el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,150)+'px'; }
@@ -1393,7 +1500,18 @@ function doUnlock() {
   if (!v) return;
   pin = v;
   document.getElementById('pin-modal').style.display = 'none';
+  loadSetupTab();
+}
+
+// One PIN unlock reveals every Setup section -- Organizations/Agents/System
+// Health don't actually check the PIN server-side (they're already gated by
+// requirePlatformAdmin, and Setup is only reachable by the platform admin's
+// own account in the first place), but splitting the unlock experience
+// per-section would be confusing for no real security benefit.
+function loadSetupTab() {
   loadDocs();
+  loadAgentList();
+  loadSystemHealth();
 }
 
 // Setup previously had no way to back out of the PIN prompt at all -- same
@@ -1623,6 +1741,92 @@ function verifyStateLabel(state) {
 }
 
 function closeVerifyModal() { document.getElementById('verify-modal').style.display = 'none'; }
+
+// Org provisioning: platform-admin-only, name-only. The new org lands the
+// platform admin as its own admin (see create-organization.mjs) so the real
+// handoff -- inviting the agency's first actual admin -- reuses the
+// Organization section already built in Settings rather than a second
+// invite flow here.
+async function createOrganization() {
+  const input = document.getElementById('new-org-name');
+  const name = input.value.trim();
+  if (!name) { toast('Enter an agency name', 'err'); return; }
+  const btn = document.getElementById('create-org-btn');
+  btn.disabled = true; btn.innerHTML = '<div class="spin"></div> Creating…';
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/create-organization', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
+      body: JSON.stringify({ name }),
+    });
+    if (res.status === 401) { await doSignOut(); return; }
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || 'Could not create organization');
+    input.value = '';
+    toast(`"${j.name}" created -- invite its first admin from Settings → Organization`, 'ok');
+    orgUIMounted = false; // force the switcher to remount so the new org shows up without a full reload
+    if (_clerk?.user) await _clerk.user.reload().catch(() => {});
+  } catch (err) {
+    toast(err.message, 'err');
+  } finally {
+    btn.disabled = false; btn.innerHTML = '<i class="ti ti-building-plus"></i> Create';
+  }
+}
+
+async function loadAgentList() {
+  const wrap = document.getElementById('agent-list');
+  wrap.innerHTML = '<div class="load-row" style="padding:1rem 0"><div class="spin"></div> Loading…</div>';
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/list-all-agents', { headers: { 'Authorization': `Bearer ${tk}` } });
+    if (res.status === 401) { await doSignOut(); return; }
+    const { agents } = await res.json();
+    if (!agents?.length) { wrap.innerHTML = '<div class="conv-empty">No agents onboarded yet</div>'; return; }
+    wrap.innerHTML = agents.map(a => {
+      const carriers = a.licensedCarriers.map(c => esc(CARRIERS[c]?.name || c)).join(', ') || 'None selected';
+      const active = a.lastActiveAt ? new Date(a.lastActiveAt).toLocaleString() : 'Never';
+      return `<div class="activity-row">
+        <div class="activity-title">${esc(a.name || a.email || a.userId)}</div>
+        <div class="activity-meta">${a.email ? esc(a.email) + ' — ' : ''}${carriers}${a.orgName ? ` — ${esc(a.orgName)}` : ''}</div>
+        <div class="activity-meta">Last active: ${esc(active)}</div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    wrap.innerHTML = `<p style="color:#E85D2F">${esc(e.message)}</p>`;
+  }
+}
+
+async function loadSystemHealth() {
+  const wrap = document.getElementById('system-health');
+  wrap.innerHTML = '<div class="load-row" style="padding:1rem 0"><div class="spin"></div> Loading…</div>';
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/system-health', { headers: { 'Authorization': `Bearer ${tk}` } });
+    if (res.status === 401) { await doSignOut(); return; }
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || 'Could not load system health');
+    const c = j.counts;
+    const v = j.verification;
+    const verifyLine = v?.error
+      ? `<span style="color:#E85D2F">Verification error: ${esc(v.error)}</span>`
+      : v
+        ? `${v.okCount} of ${v.totalDocuments} documents verified${(v.problems?.length || v.orphaned?.length) ? ` — ${v.problems.length} issue(s), ${v.orphaned.length} orphaned` : ' — no issues'}`
+        : 'Verification unavailable';
+    wrap.innerHTML = `
+      <div class="activity-row">
+        <div class="activity-title">Document index</div>
+        <div class="activity-meta">${verifyLine}</div>
+      </div>
+      <div class="activity-row">
+        <div class="activity-title">Record counts</div>
+        <div class="activity-meta">${c.agents ?? '—'} agents · ${c.conversations ?? '—'} conversations · ${c.clientProfiles ?? '—'} client profiles · ${c.recommendations ?? '—'} recommendations</div>
+      </div>
+      <p style="color:var(--muted);font-size:.78rem;margin-top:.5rem">Checked ${new Date(j.checkedAt).toLocaleString()}</p>`;
+  } catch (e) {
+    wrap.innerHTML = `<p style="color:#E85D2F">${esc(e.message)}</p>`;
+  }
+}
 
 async function delDoc(cid, sid) {
   if (!confirm('Remove this document? Agents will no longer be able to search it.')) return;
