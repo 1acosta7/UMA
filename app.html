@@ -378,9 +378,12 @@
 
 <div id="toasts"></div>
 
-<div class="overlay" id="pin-modal" style="display:none">
+<div class="overlay" id="pin-modal" style="display:none" onclick="if(event.target===this) closePin()">
   <div class="modal">
-    <h3><i class="ti ti-lock"></i> Setup Access</h3>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:1rem">
+      <h3 style="margin-bottom:.35rem"><i class="ti ti-lock"></i> Setup Access</h3>
+      <button class="sidebar-close-btn" onclick="closePin()" title="Close"><i class="ti ti-x"></i></button>
+    </div>
     <p>Enter the admin PIN to manage underwriting documents.</p>
     <input type="password" id="pin-in" class="pin-in" placeholder="••••••" autocomplete="off" />
     <div class="pin-err" id="pin-err">Incorrect PIN. Try again.</div>
@@ -518,12 +521,10 @@
         <div class="setup-hd" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
           <div>
             <h2>Organization</h2>
-            <p>Optional -- solo agents can ignore this entirely and keep working exactly as before. Create an agency organization to invite other agents under their own individual logins; each agent's clients, conversations, and recommendations stay private to them by default, with no automatic visibility for org admins.</p>
+            <p>Optional -- solo agents can ignore this entirely and keep working exactly as before. If your agency has been set up as an organization, switch between your personal and org context here, or leave an org you're a member of. Each agent's clients, conversations, and recommendations stay private to them by default, with no automatic visibility for org admins. Agencies are provisioned by Uma's platform admin -- reach out if yours needs to be set up.</p>
           </div>
         </div>
         <div id="org-switcher-mount" style="margin-bottom:1rem"></div>
-        <button class="sbtn" id="org-create-toggle-btn" onclick="toggleCreateOrg()"><i class="ti ti-building-plus"></i> Create an organization</button>
-        <div id="org-create-mount" style="display:none;margin-top:1rem"></div>
         <div id="org-profile-mount" style="margin-top:1rem"></div>
 
         <div class="setup-hd" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
@@ -612,6 +613,7 @@ window.addEventListener('load', async function() {
 
 let licensedCarriers = [];
 let defaultProductType = null;
+let isPlatformAdminUser = false;
 
 function initApp(clerk) {
   _clerk = clerk;
@@ -636,6 +638,7 @@ async function checkOnboarding() {
     const res = await fetch('/.netlify/functions/get-user-settings', { headers: { 'Authorization': `Bearer ${tk}` } });
     if (res.status === 401) { await doSignOut(); return; }
     const j = await res.json();
+    isPlatformAdminUser = !!j.isPlatformAdmin;
     if (!j.licensedCarriers || !j.licensedCarriers.length) {
       showOnboarding();
       return;
@@ -643,8 +646,21 @@ async function checkOnboarding() {
     licensedCarriers = j.licensedCarriers;
     defaultProductType = j.defaultProductType || null;
   } catch { /* fail open -- see comment above */ }
+  applyPlatformAdminVisibility();
   document.getElementById('app').style.display = 'flex';
   refreshConvList();
+}
+
+// Setup is platform-admin-only content management, not just PIN-gated --
+// the tab itself must be completely absent for every other agent, not
+// merely blocked behind a PIN prompt they can see exists. Removing the
+// nodes (not just hiding via CSS) so there's nothing left to inspect either.
+// Called before #app is ever shown, so no agent sees it flash in first.
+function applyPlatformAdminVisibility() {
+  if (!isPlatformAdminUser) {
+    document.getElementById('tab-setup')?.remove();
+    document.getElementById('panel-setup')?.remove();
+  }
 }
 
 function carrierOptsHtml(idPrefix, checkedList) {
@@ -682,6 +698,7 @@ async function submitOnboarding() {
     const j = await res.json();
     licensedCarriers = j.licensedCarriers || checked;
     document.getElementById('onboarding-modal').style.display = 'none';
+    applyPlatformAdminVisibility();
     document.getElementById('app').style.display = 'flex';
     refreshConvList();
   } catch {
@@ -725,7 +742,7 @@ async function doSignOut() { await _clerk?.signOut(); window.location.href = '/i
 // can't reintroduce that "nothing to tap" bug by construction).
 function switchTab(t) {
   ["search","setup"].forEach(x => {
-    document.getElementById("tab-"+x).classList.toggle("active", x===t);
+    document.getElementById("tab-"+x)?.classList.toggle("active", x===t);
   });
   ["search","setup","settings"].forEach(x => {
     document.getElementById("panel-"+x)?.classList.toggle("active", x===t);
@@ -799,12 +816,16 @@ async function loadMyActivity() {
   } catch { wrap.innerHTML = '<div class="conv-empty">Could not load activity</div>'; }
 }
 
-// Org signup flow, built entirely on Clerk's own prebuilt components (same
-// approach login.html already uses for mountSignIn) rather than hand-rolled
-// invite forms -- Clerk owns the actual org/membership/invite objects, we
-// only mirror the result into org-members (see sync-org-membership.mjs).
-// Mounted lazily on first visit to the Setup tab, not at page load, since
-// most agents are solo and will never open this section.
+// Org switcher/profile, built entirely on Clerk's own prebuilt components
+// (same approach login.html already uses for mountSignIn) rather than
+// hand-rolled invite forms -- Clerk owns the actual org/membership/invite
+// objects, we only mirror the result into org-members (see
+// sync-org-membership.mjs). Mounted lazily on first visit to Settings, not
+// at page load, since most agents are solo and will never open this section.
+// Org creation is deliberately not offered here -- agencies are provisioned
+// by the platform admin (see requirePlatformAdmin in _shared.mjs), not
+// self-serve, so the switcher's own built-in "Create organization" action is
+// hidden via appearance rather than left reachable.
 let orgUIMounted = false;
 
 function mountOrgUI() {
@@ -816,25 +837,17 @@ function mountOrgUI() {
         hidePersonal: false,
         afterSelectOrganizationUrl: '/app.html',
         afterSelectPersonalUrl: '/app.html',
-        afterCreateOrganizationUrl: '/app.html',
+        appearance: {
+          elements: {
+            organizationSwitcherPopoverActionButton__createOrganization: { display: 'none' },
+          },
+        },
       });
-    } catch { /* Organizations not enabled for this instance -- leave the section quietly empty rather than erroring the whole Setup tab */ }
+    } catch { /* Organizations not enabled for this instance -- leave the section quietly empty rather than erroring the whole Settings tab */ }
     _clerk.addListener(() => { syncOrgMembership(); renderOrgProfile(); });
   }
   renderOrgProfile();
   syncOrgMembership();
-}
-
-function toggleCreateOrg() {
-  const el = document.getElementById('org-create-mount');
-  const showing = el.style.display !== 'none';
-  el.style.display = showing ? 'none' : 'block';
-  if (!showing && !el.dataset.mounted) {
-    el.dataset.mounted = '1';
-    try {
-      _clerk.mountCreateOrganization(el, { afterCreateOrganizationUrl: '/app.html' });
-    } catch { toast('Could not load organization creation', 'err'); }
-  }
 }
 
 // Admin invite/member-management UI is entirely Clerk's own OrganizationProfile
@@ -1383,6 +1396,16 @@ function doUnlock() {
   loadDocs();
 }
 
+// Setup previously had no way to back out of the PIN prompt at all -- same
+// bug class as the sidebar's original missing close button, just on a fixed
+// overlay instead of a panel. X button plus tapping the dimmed backdrop
+// both dismiss it and return to Search, since staying on an empty Setup tab
+// behind a closed modal isn't a useful place to land.
+function closePin() {
+  document.getElementById('pin-modal').style.display = 'none';
+  switchTab('search');
+}
+
 async function loadDocs() {
   document.getElementById('carrier-cards').innerHTML =
     '<div class="load-row" style="padding:2rem 0"><div class="spin"></div> Loading…</div>';
@@ -1447,8 +1470,9 @@ async function doUp(e, cid, sid) {
   toast('Uploading and classifying pages…','info');
   try {
     const b64 = await toB64(file);
+    const tk = await token();
     const res = await fetch('/.netlify/functions/upload', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST', headers:{'Content-Type':'application/json', 'Authorization': `Bearer ${tk}`},
       body: JSON.stringify({ pin, carrier:cid, slotId:sid, data:b64, filename:file.name }),
     });
     if (res.status===401) { pin=null; toast('Incorrect PIN','err'); showPin(); return; }
@@ -1508,8 +1532,9 @@ async function runBackfill(dryRun) {
   if (!dryRun && !confirm('This writes a client profile for every existing conversation that doesn\'t have one yet. Preview first if you haven\'t already. Continue?')) return;
   if (btn) { btn.disabled = true; btn.innerHTML = `<div class="spin"></div> ${dryRun ? 'Previewing' : 'Running'}…`; }
   try {
+    const tk = await token();
     const res = await fetch('/.netlify/functions/backfill-client-profiles', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
       body: JSON.stringify({ pin, dryRun: !!dryRun }),
     });
     if (res.status === 401) { pin = null; toast('Incorrect PIN', 'err'); showPin(); return; }
@@ -1602,8 +1627,9 @@ function closeVerifyModal() { document.getElementById('verify-modal').style.disp
 async function delDoc(cid, sid) {
   if (!confirm('Remove this document? Agents will no longer be able to search it.')) return;
   try {
+    const tk = await token();
     const res = await fetch('/.netlify/functions/delete-doc', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST', headers:{'Content-Type':'application/json', 'Authorization': `Bearer ${tk}`},
       body: JSON.stringify({ pin, carrier:cid, slotId:sid }),
     });
     if (res.status===401) { pin=null; toast('Incorrect PIN','err'); showPin(); return; }
