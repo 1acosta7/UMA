@@ -1,5 +1,17 @@
-import { verifyToken } from "@clerk/backend";
+import { verifyToken, createClerkClient } from "@clerk/backend";
 import { getStore } from "@netlify/blobs";
+
+// Lazy singleton -- the admin-dashboard and hierarchy endpoints are the
+// first callers that need to reach Clerk's own user/org records (email,
+// name, org name) rather than just verifying a token, so this is created
+// on first use rather than at every cold start.
+let _clerkClient = null;
+export function getClerkClient() {
+  if (!_clerkClient) {
+    _clerkClient = createClerkClient({ secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
+  }
+  return _clerkClient;
+}
 
 export const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -237,6 +249,22 @@ export async function saveUserSettings(userId, patch) {
   return record;
 }
 
+// The admin dashboard's agent list source of truth: every real Uma agent
+// has exactly one record here, written at onboarding (keyed by userId, no
+// nesting), so listing this store with no prefix returns every agent who's
+// actually used the app -- not every Clerk user on the instance, which
+// could include stray/incomplete signups this app never treated as active.
+export async function listAllUserSettings() {
+  const store = getStore({ name: "user-settings", consistency: "strong" });
+  try {
+    const { blobs } = await store.list();
+    const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));
+    return entries.filter(Boolean).map((t) => JSON.parse(t));
+  } catch {
+    return [];
+  }
+}
+
 // Agency/per-seat accounts, layered on top of Clerk Organizations. Clerk
 // owns the actual org/membership/invite/role objects -- this store is our
 // own materialized view of "who's an active seat in which org," built up
@@ -278,6 +306,21 @@ export async function listOrgMembers(orgId) {
   const store = getStore({ name: "org-members", consistency: "strong" });
   try {
     const { blobs } = await store.list({ prefix: `${orgId}/` });
+    const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));
+    return entries.filter(Boolean).map((t) => JSON.parse(t));
+  } catch {
+    return [];
+  }
+}
+
+// Same store, no org prefix -- every membership record across every org.
+// Only the admin dashboard's agent list needs this (to know which org, if
+// any, each agent belongs to without querying per-org); everything else
+// scopes to one org via listOrgMembers, on purpose.
+export async function listAllOrgMembers() {
+  const store = getStore({ name: "org-members", consistency: "strong" });
+  try {
+    const { blobs } = await store.list();
     const entries = await Promise.all(blobs.map((b) => store.get(b.key, { type: "text" })));
     return entries.filter(Boolean).map((t) => JSON.parse(t));
   } catch {
@@ -449,6 +492,20 @@ export async function readSecurityEvents(userId) {
     return entries.filter(Boolean).map((t) => JSON.parse(t)).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   } catch {
     return [];
+  }
+}
+
+// Read-only counterpart to checkConcurrentSession's write -- lets the admin
+// dashboard and My Team roster show "last active" using activity that's
+// already being recorded on every authenticated request, without adding any
+// new instrumentation.
+export async function getLastSeenAt(userId) {
+  const store = getStore({ name: "session-activity", consistency: "strong" });
+  try {
+    const text = await store.get(userId, { type: "text" });
+    return text ? JSON.parse(text).lastSeenAt : null;
+  } catch {
+    return null;
   }
 }
 
