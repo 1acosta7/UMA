@@ -65,7 +65,7 @@ export default async function handler(req) {
   const directReports = withIdentity.filter((m) => m.reportsTo === ctx.userId);
   const orgRoster = isOrgAdmin ? withIdentity : null;
 
-  return new Response(JSON.stringify({ directReports, isOrgAdmin, orgRoster }), {
+  return new Response(JSON.stringify({ directReports, isOrgAdmin, orgRoster, _debugOrgRole: ctx.orgRole }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },
   });
 }
