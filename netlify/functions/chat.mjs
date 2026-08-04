@@ -78,7 +78,12 @@ Two optional trailing lines, only when they actually apply:
 
 HARD RULE ON OTHER CARRIERS: the name of any carrier other than the one you're recommending must NEVER appear anywhere in your response -- not in a sentence explaining why it lost, not in a list of what you checked, not in a clause, nowhere. If you're about to type a second carrier's name, stop and delete that sentence instead. This is not a style preference -- a response naming a non-recommended carrier is a wrong response even if the recommendation itself is correct. Do not otherwise mention: your internal reasoning, comparison tables, full underwriting tables, or which conditions each carrier would have declined. The Source line is the one exception to "no citations visible" -- keep it short. If I ask for more detail or a comparison, give it then -- not by default.
 
-If the retrieved documents don't provide enough evidence to make a recommendation, say exactly: "Additional underwriting information is required before a recommendation can be made." Do not guess. If I haven't uploaded guidelines for a carrier at all, that's the kind of gap worth naming rather than silently working around.
+If the retrieved documents don't provide enough evidence to make a recommendation, open with exactly: "Additional underwriting information is required before a recommendation can be made." Then explain WHY, and get this distinction right -- it is the most common way this response goes wrong:
+- CLIENT PROFILE incomplete: I genuinely didn't state a fact you need (height/weight for a build chart, state, a lab value, etc.). Before writing this, re-check my message field by field and name only the fact(s) actually absent from it. Never claim something is missing that I actually stated -- that is a false claim about my own message, not a gap in the guidelines.
+- RETRIEVED GUIDANCE incomplete: my profile is complete enough, but what was retrieved doesn't establish a rate class (e.g. only program-eligibility, process, or administrative text came back, not the actual condition/build/rate chart). Say so in those terms, e.g. "I wasn't able to locate baseline rate-classification guidance in the retrieved material for this case -- this may need a follow-up search or manual reference to the guideline." Never describe this as missing client information.
+- If I haven't uploaded guidelines for a carrier at all, that's a third, distinct gap worth naming rather than silently working around.
+Stay inside the HARD RULE above either way -- describe a gap without naming a non-recommended carrier.
+Do not guess in any of these cases.
 
 Act like an experienced senior field underwriter deciding which application to open first today. That is your final answer.`;
 
@@ -646,6 +651,24 @@ async function buildAnalysisContext({ anthropic, supabase, openai, carrierStore,
         for (const [carrier, info] of Object.entries(parsed.carriers || {})) {
           selected[carrier] = info.docs || [];
           tierByCarrier[carrier] = info.tier === "narrative_only" ? "narrative_only" : "full";
+        }
+        // Clean/no-diagnosis cases: force full tier regardless of what triage
+        // decided. The binding question for a healthy applicant is still a
+        // numeric one -- the build/BMI chart -- and narrative_only skips
+        // loading that chart entirely, which is exactly the document that
+        // actually answers a clean case. Semantic search over narrative
+        // chunks has no medical keyword to anchor on when there's no
+        // diagnosis, so it tends to surface topically-adjacent-but-wrong
+        // content (program eligibility, retention limits) instead of the
+        // baseline rate table -- narrative_only is only trustworthy when
+        // there's a real diagnosis for the narrative text to have actually
+        // addressed. Code-level override rather than a triage-prompt reword
+        // because "zero diagnoses" is a fact we already have deterministically
+        // from intake extraction, not a judgment call worth leaving to the
+        // triage model's own (evidently unreliable, for this case shape)
+        // inference.
+        if (intakeForDebug && Array.isArray(intakeForDebug.diagnoses) && intakeForDebug.diagnoses.length === 0) {
+          for (const carrier of Object.keys(tierByCarrier)) tierByCarrier[carrier] = "full";
         }
         // Deliberately NOT passed into the final call as context: the triage
         // model's bindingConstraint/caseType read is a retrieval-gating aid
