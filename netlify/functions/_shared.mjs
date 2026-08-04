@@ -33,10 +33,20 @@ export async function requireUserContext(authHeader) {
   if (!token) throw new Error("Missing token");
   const claims = await verifyToken(token, { secretKey: Netlify.env.get("CLERK_SECRET_KEY") });
   if (!claims?.sub) throw new Error("Invalid token");
+  // This Clerk instance issues "compact" (v2) session tokens, which nest org
+  // claims under a single `o: {id, rol, slg}` object instead of the flat
+  // org_id/org_role/org_slug claims older integrations (and this function,
+  // originally) assumed -- verifyToken returns the token's claims as-is, it
+  // doesn't expand this back to the flat shape. `o.rol` is documented as the
+  // role with its "org:" prefix stripped for size, so it's reconstructed
+  // here. Falling back to the flat claims first keeps this correct if the
+  // instance's token format ever changes back.
+  const orgId = claims.org_id || claims.o?.id || null;
+  const orgRole = claims.org_role || (claims.o?.rol ? `org:${claims.o.rol}` : null);
   const ctx = {
     userId: claims.sub,
-    orgId: claims.org_id || null,
-    orgRole: claims.org_role || null,
+    orgId,
+    orgRole,
     sessionId: claims.sid || null,
   };
   // Best-effort, never allowed to affect the actual auth result -- see
