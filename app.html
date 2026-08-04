@@ -553,14 +553,6 @@
 
         <div class="setup-hd" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
           <div>
-            <h2>Recent Activity</h2>
-            <p>Your own recommendation history across every client -- most recent first.</p>
-          </div>
-        </div>
-        <div id="activity-list"></div>
-
-        <div class="setup-hd" style="margin-top:2rem;padding-top:1.5rem;border-top:1px solid var(--border)">
-          <div>
             <h2>Data &amp; Privacy</h2>
             <p>Placeholder copy -- to be refined. Client information you submit is used only to generate underwriting recommendations for your own account and is not shared with other agents or carriers. Recommendation history is retained to support your own review and audit needs. Contact your administrator with questions about data retention or deletion.</p>
           </div>
@@ -746,7 +738,6 @@ function switchTab(t) {
     mountOrgUI();
     mountUserProfileUI();
     renderProductTypePreference();
-    loadMyActivity();
   }
 }
 
@@ -780,10 +771,14 @@ async function saveProductTypePreference() {
   } catch { toast('Could not save -- try again', 'err'); }
 }
 
-// Recommendation status shape mirrors what chat.mjs actually saves (see
-// saveRecommendation call sites): "ok" with recommendedCarrier/Product, or
-// "extraction_failed" with only errorMessage/rawAnswerText -- both are real
-// records worth showing here, not just the clean ones.
+// Not currently called anywhere -- Recent Activity was pulled from the
+// Settings panel UI, but this fetch/render logic (and the list-my-recommendations
+// endpoint it hits) is left intact for when it gets a proper home (its own
+// tab, a dashboard, etc). Recommendation status shape mirrors what chat.mjs
+// actually saves (see saveRecommendation call sites): "ok" with
+// recommendedCarrier/Product, or "extraction_failed" with only
+// errorMessage/rawAnswerText -- both are real records worth showing, not
+// just the clean ones.
 async function loadMyActivity() {
   const wrap = document.getElementById('activity-list');
   if (!wrap) return;
