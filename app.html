@@ -671,6 +671,29 @@ function initApp(clerk) {
   document.getElementById('auth-screen').style.display = 'none';
   checkOnboarding();
   if (clerk.organization) syncOrgMembership(); // agent already has an active org on this device/session -- keep org-members fresh without requiring a Setup-tab visit
+  processPendingReferral();
+}
+
+// Picks up the code login.html stashed (see its own comment) if this login
+// followed a referral link. Fires at most once per code -- cleared from
+// sessionStorage right away regardless of outcome, so a failed or already-
+// processed code can't retry forever on every subsequent page load.
+async function processPendingReferral() {
+  const code = sessionStorage.getItem('pendingReferralCode');
+  if (!code) return;
+  sessionStorage.removeItem('pendingReferralCode');
+  try {
+    const tk = await token();
+    const res = await fetch('/.netlify/functions/accept-referral', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
+      body: JSON.stringify({ code }),
+    });
+    if (!res.ok) return; // invalid/self/expired link -- fail quietly, not worth surfacing to a brand-new agent mid-signup
+    if (_clerk?.user) await _clerk.user.reload().catch(() => {}); // picks up the new org membership without a manual refresh
+    orgUIMounted = false;
+    toast('Joined your team', 'ok');
+  } catch { /* best-effort -- referral joining should never block getting into the app */ }
 }
 
 // Phase 3: first-login gate. licensedCarriers === null means the agent has
@@ -926,22 +949,40 @@ async function syncOrgMembership() {
   } catch { /* best-effort -- never block the agent's actual work on this */ }
 }
 
-// My Team is roster-only by design (see list-my-team.mjs) -- a reporting
-// line is an organizational fact, not a data-sharing grant. This section
-// stays hidden unless it's actually relevant: either you have direct
-// reports (roster view) or you're org:admin (reporting-structure control),
-// same fade-into-the-background treatment Organization gets for solo agents.
+// My Team shows a referral link to every agent in an org, regardless of
+// whether they have anyone reporting to them yet -- "has a team" is the
+// destination this builds toward, not a precondition (see
+// get-referral-link.mjs). Roster is otherwise roster-only by design (see
+// list-my-team.mjs): a reporting line is an organizational fact, not a
+// data-sharing grant, and a client COUNT is the one deliberate, bounded
+// exception to "never client data" -- a number, never a name or case.
 async function loadMyTeam() {
   const hd = document.getElementById('my-team-hd');
   const wrap = document.getElementById('my-team-content');
   if (!_clerk?.organization) { hd.style.display = 'none'; wrap.style.display = 'none'; return; }
+  hd.style.display = 'flex'; wrap.style.display = 'block';
   try {
     const tk = await token();
-    const res = await fetch('/.netlify/functions/list-my-team', { headers: { 'Authorization': `Bearer ${tk}` } });
-    if (res.status === 401) { await doSignOut(); return; }
-    const { downline, isOrgAdmin, orgRoster } = await res.json();
-    if (!downline.length && !isOrgAdmin) { hd.style.display = 'none'; wrap.style.display = 'none'; return; }
-    hd.style.display = 'flex'; wrap.style.display = 'block';
+    const [teamRes, linkRes] = await Promise.all([
+      fetch('/.netlify/functions/list-my-team', { headers: { 'Authorization': `Bearer ${tk}` } }),
+      fetch('/.netlify/functions/get-referral-link', { headers: { 'Authorization': `Bearer ${tk}` } }),
+    ]);
+    if (teamRes.status === 401 || linkRes.status === 401) { await doSignOut(); return; }
+    const { downline, isOrgAdmin, orgRoster } = await teamRes.json();
+    const { code } = await linkRes.json();
+
+    let html = '';
+    if (code) {
+      const link = `${location.origin}/login.html?ref=${code}`;
+      html += `
+        <div style="margin-bottom:1.5rem">
+          <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:.4rem">Your referral link -- anyone who joins through it lands on your team automatically</label>
+          <div style="display:flex;gap:.5rem">
+            <input type="text" readonly value="${esc(link)}" id="referral-link-input" class="pin-in" style="margin-bottom:0" onclick="this.select()" />
+            <button class="sbtn" onclick="copyReferralLink()" style="flex-shrink:0"><i class="ti ti-copy"></i> Copy</button>
+          </div>
+        </div>`;
+    }
 
     // downline is already depth-ordered (BFS from the server) -- direct
     // reports first, then their reports, etc. Every manager between you and
@@ -952,17 +993,17 @@ async function loadMyTeam() {
     const rosterRow = (m) => {
       const manager = m.depth > 1 ? byId.get(m.reportsTo) : null;
       const managerLine = manager ? ` · Reports to ${esc(manager.name || manager.email || manager.userId)}` : '';
+      const clients = `${m.clientCount} client${m.clientCount === 1 ? '' : 's'}`;
       return `<div class="activity-row" style="margin-left:${(m.depth - 1) * 20}px">
       <div class="activity-title">${esc(m.name || m.email || m.userId)}</div>
-      <div class="activity-meta">${m.email ? esc(m.email) + ' — ' : ''}${m.licensedCarriers.map(c => esc(CARRIERS[c]?.name || c)).join(', ') || 'No carriers selected'}</div>
+      <div class="activity-meta">${m.email ? esc(m.email) + ' — ' : ''}${m.licensedCarriers.map(c => esc(CARRIERS[c]?.name || c)).join(', ') || 'No carriers selected'} — ${clients}</div>
       <div class="activity-meta">Last active: ${esc(m.lastActiveAt ? new Date(m.lastActiveAt).toLocaleString() : 'Never')}${managerLine}</div>
     </div>`;
     };
 
-    let html = '';
     html += downline.length
       ? downline.map(rosterRow).join('')
-      : '<div class="conv-empty">No one reports to you yet</div>';
+      : '<div class="conv-empty">No one on your team yet -- share your referral link above</div>';
 
     if (isOrgAdmin) {
       const opts = (list, blankLabel) => `<option value="">${esc(blankLabel)}</option>` +
@@ -979,7 +1020,17 @@ async function loadMyTeam() {
         </div>`;
     }
     wrap.innerHTML = html;
-  } catch { hd.style.display = 'none'; wrap.style.display = 'none'; }
+  } catch { wrap.innerHTML = '<div class="conv-empty">Could not load your team</div>'; }
+}
+
+function copyReferralLink() {
+  const input = document.getElementById('referral-link-input');
+  if (!input) return;
+  input.select();
+  navigator.clipboard?.writeText(input.value).then(
+    () => toast('Referral link copied', 'ok'),
+    () => toast('Could not copy -- select and copy manually', 'err'),
+  );
 }
 
 async function assignReportsTo() {

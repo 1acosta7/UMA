@@ -25,6 +25,17 @@ body { background: #0B1220; min-height: 100vh; display: flex; flex-direction: co
 <div id="sign-in"></div>
 <a href="/index.html" class="back">← Back to home</a>
 <script>
+// A referral link points here as /login.html?ref=CODE -- stashed in
+// sessionStorage (survives Clerk's whole sign-in/sign-up redirect chain,
+// which doesn't reliably preserve arbitrary extra query params) so app.html
+// can pick it up and call accept-referral.mjs once the person is actually
+// authenticated, whether this was a brand-new sign-up or an existing agent
+// signing in.
+(function() {
+  const ref = new URLSearchParams(window.location.search).get('ref');
+  if (ref) sessionStorage.setItem('pendingReferralCode', ref);
+})();
+
 window.addEventListener('load', async function() {
   try {
     await window.Clerk.load();
