@@ -446,6 +446,33 @@ export async function resolveReferralCode(code) {
   }
 }
 
+// Lets an agent swap their random code for a memorable one (their own
+// name, typically). Format validation (charset/length) happens in
+// set-referral-code.mjs, closer to the HTTP error message -- this just
+// handles the store mechanics: refuse a code someone else already owns,
+// retire the old code so it stops resolving (an old shared link shouldn't
+// silently keep working once someone's picked a new one), then write the
+// new one in its place.
+export async function setReferralCode(orgId, userId, desiredCode) {
+  const codeStore = getStore({ name: "referral-codes", consistency: "strong" });
+  const existing = await codeStore.get(desiredCode, { type: "text" }).catch(() => null);
+  if (existing) {
+    const owner = JSON.parse(existing);
+    if (owner.referringUserId !== userId) return { ok: false, error: "That link is already taken" };
+    return { ok: true, code: desiredCode }; // already theirs, nothing to do
+  }
+
+  const member = await loadOrgMember(orgId, userId);
+  const oldCode = member?.referralCode;
+
+  await codeStore.set(desiredCode, JSON.stringify({ orgId, referringUserId: userId, createdAt: new Date().toISOString() }));
+  await upsertOrgMember(orgId, userId, { referralCode: desiredCode });
+  if (oldCode && oldCode !== desiredCode) {
+    await codeStore.delete(oldCode).catch(() => {});
+  }
+  return { ok: true, code: desiredCode };
+}
+
 // Count only, never the underlying records -- this is what powers the "N
 // clients" figure a manager sees for someone on their team. Deliberately a
 // bare count (blobs.length off a prefix listing, not a read of any actual
