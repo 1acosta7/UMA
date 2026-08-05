@@ -25,14 +25,23 @@ body { background: #0B1220; min-height: 100vh; display: flex; flex-direction: co
 <div id="sign-in"></div>
 <a href="/index.html" class="back">← Back to home</a>
 <script>
-// A referral link points here as /login.html?ref=CODE -- stashed in
-// sessionStorage (survives Clerk's whole sign-in/sign-up redirect chain,
-// which doesn't reliably preserve arbitrary extra query params) so app.html
-// can pick it up and call accept-referral.mjs once the person is actually
-// authenticated, whether this was a brand-new sign-up or an existing agent
-// signing in.
+// A referral link can arrive two ways: the explicit /login.html?ref=CODE
+// form, or the clean /CODE form that netlify.toml rewrites into this page.
+// That rewrite is server-side only -- Netlify serves this page's content
+// for /CODE but never updates window.location to the "to" target, so the
+// ?ref= query string in netlify.toml's redirect is invisible here; the
+// browser still sees the original path, which is exactly what falling back
+// to pathname picks up. Stashed in sessionStorage (survives Clerk's whole
+// sign-in/sign-up redirect chain, which doesn't reliably preserve arbitrary
+// extra query params) so app.html can pick it up and call
+// accept-referral.mjs once the person is actually authenticated, whether
+// this was a brand-new sign-up or an existing agent signing in.
 (function() {
-  const ref = new URLSearchParams(window.location.search).get('ref');
+  let ref = new URLSearchParams(window.location.search).get('ref');
+  if (!ref) {
+    const path = window.location.pathname.replace(/^\/+|\/+$/g, '');
+    if (path && !['login.html', 'index.html', 'app.html'].includes(path)) ref = path;
+  }
   if (ref) sessionStorage.setItem('pendingReferralCode', ref);
 })();
 

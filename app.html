@@ -973,7 +973,7 @@ async function loadMyTeam() {
 
     let html = '';
     if (code) {
-      const link = `${location.origin}/login.html?ref=${code}`;
+      const link = `${location.origin}/${code}`;
       html += `
         <div style="margin-bottom:1.5rem">
           <label style="display:block;font-size:.8rem;color:var(--muted);margin-bottom:.4rem">Your referral link -- anyone who joins through it lands on your team automatically</label>
@@ -982,7 +982,7 @@ async function loadMyTeam() {
             <button class="sbtn" onclick="copyReferralLink()" style="flex-shrink:0"><i class="ti ti-copy"></i> Copy</button>
           </div>
           <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap">
-            <span style="color:var(--muted);font-size:.8rem">Customize: ${esc(location.origin)}/login.html?ref=</span>
+            <span style="color:var(--muted);font-size:.8rem">Customize: ${esc(location.origin)}/</span>
             <input type="text" id="referral-code-input" value="${esc(code)}" placeholder="your-name" class="pin-in" style="margin-bottom:0;max-width:160px" />
             <button class="sbtn" onclick="saveReferralCode()"><i class="ti ti-device-floppy"></i> Save</button>
           </div>
