@@ -31,18 +31,22 @@ body { background: #0B1220; min-height: 100vh; display: flex; flex-direction: co
 // for /CODE but never updates window.location to the "to" target, so the
 // ?ref= query string in netlify.toml's redirect is invisible here; the
 // browser still sees the original path, which is exactly what falling back
-// to pathname picks up. Stashed in sessionStorage (survives Clerk's whole
-// sign-in/sign-up redirect chain, which doesn't reliably preserve arbitrary
-// extra query params) so app.html can pick it up and call
-// accept-referral.mjs once the person is actually authenticated, whether
-// this was a brand-new sign-up or an existing agent signing in.
+// to pathname picks up. Stashed in localStorage (not sessionStorage --
+// Clerk's sign-in/sign-up flow, or someone bouncing through "Back to home"
+// and clicking "Get Started Free" again, can plausibly involve a different
+// tab/window before landing back on app.html, and only localStorage
+// survives that) so app.html can pick it up and call accept-referral.mjs
+// once the person is actually authenticated, whether this was a brand-new
+// sign-up or an existing agent signing in. Never overwritten with nothing
+// -- if this load doesn't find a code, whatever's already stored from an
+// earlier visit is left alone rather than silently dropped.
 (function() {
   let ref = new URLSearchParams(window.location.search).get('ref');
   if (!ref) {
     const path = window.location.pathname.replace(/^\/+|\/+$/g, '');
     if (path && !['login.html', 'index.html', 'app.html'].includes(path)) ref = path;
   }
-  if (ref) sessionStorage.setItem('pendingReferralCode', ref);
+  if (ref) localStorage.setItem('pendingReferralCode', ref);
 })();
 
 window.addEventListener('load', async function() {

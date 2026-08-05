@@ -679,9 +679,13 @@ function initApp(clerk) {
 // sessionStorage right away regardless of outcome, so a failed or already-
 // processed code can't retry forever on every subsequent page load.
 async function processPendingReferral() {
-  const code = sessionStorage.getItem('pendingReferralCode');
+  // localStorage, not sessionStorage -- Clerk's own sign-up flow (email
+  // verification, the "Back to home" link, "Get Started Free" being clicked
+  // again from the marketing page) can plausibly land the agent in a
+  // different tab/window before they ever reach app.html, and sessionStorage
+  // doesn't survive that; localStorage does.
+  const code = localStorage.getItem('pendingReferralCode');
   if (!code) return;
-  sessionStorage.removeItem('pendingReferralCode');
   try {
     const tk = await token();
     const res = await fetch('/.netlify/functions/accept-referral', {
@@ -689,11 +693,24 @@ async function processPendingReferral() {
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${tk}` },
       body: JSON.stringify({ code }),
     });
-    if (!res.ok) return; // invalid/self/expired link -- fail quietly, not worth surfacing to a brand-new agent mid-signup
-    if (_clerk?.user) await _clerk.user.reload().catch(() => {}); // picks up the new org membership without a manual refresh
-    orgUIMounted = false;
-    toast('Joined your team', 'ok');
-  } catch { /* best-effort -- referral joining should never block getting into the app */ }
+    if (res.ok) {
+      localStorage.removeItem('pendingReferralCode');
+      if (_clerk?.user) await _clerk.user.reload().catch(() => {}); // picks up the new org membership without a manual refresh
+      orgUIMounted = false;
+      toast('Joined your team', 'ok');
+    } else if (res.status === 400 || res.status === 404) {
+      // Permanent failure (self-referral, malformed, or a code that no
+      // longer resolves) -- retrying it on every future load would never
+      // succeed, so stop holding onto it.
+      localStorage.removeItem('pendingReferralCode');
+    }
+    // Any other failure (5xx, a Clerk API hiccup) leaves the code in place
+    // on purpose -- this is exactly the gap that let a real signup end up
+    // with no org membership and no way to recover: the old code cleared
+    // the pending code unconditionally, before confirming success, so one
+    // transient failure lost the referral permanently with nothing to
+    // retry. Now it's picked back up on the agent's next load instead.
+  } catch { /* network hiccup -- code stays in place, retried on next load */ }
 }
 
 // Phase 3: first-login gate. licensedCarriers === null means the agent has
