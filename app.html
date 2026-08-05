@@ -670,8 +670,19 @@ function initApp(clerk) {
   document.getElementById('avatar').textContent = first[0].toUpperCase();
   document.getElementById('auth-screen').style.display = 'none';
   checkOnboarding();
-  if (clerk.organization) syncOrgMembership(); // agent already has an active org on this device/session -- keep org-members fresh without requiring a Setup-tab visit
-  processPendingReferral();
+  // Sequenced, not fired concurrently: both syncOrgMembership() and
+  // processPendingReferral() do a read-modify-write on the same
+  // org-members record (role vs. reportsTo respectively), and
+  // upsertOrgMember has no locking. Firing them unawaited let a stale
+  // syncOrgMembership snapshot -- read before accept-referral's write
+  // landed, itself missing reportsTo entirely -- overwrite a correctly-set
+  // reportsTo moments later. Confirmed live: a real referral join set
+  // reportsTo correctly, then it silently reverted to null. Awaiting sync
+  // first makes accept-referral's write the last one for a fresh sign-up.
+  (async () => {
+    if (clerk.organization) await syncOrgMembership(); // agent already has an active org on this device/session -- keep org-members fresh without requiring a Setup-tab visit
+    await processPendingReferral();
+  })();
 }
 
 // Picks up the code login.html stashed (see its own comment) if this login
