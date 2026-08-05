@@ -1,6 +1,18 @@
 [functions]
   node_bundler = "esbuild"
 
+# Referral links: /<code> -> the login/signup page with that code applied
+# (see login.html's own script for how it's picked up from there). Only
+# fires for paths with no matching real file -- login.html/app.html/
+# index.html and everything under /.netlify/functions/* always take
+# priority over any redirect, so this can't shadow them. Must come before
+# the catch-all below, since redirects are evaluated in order and that one
+# would otherwise match first.
+[[redirects]]
+  from = "/:code"
+  to = "/login.html?ref=:code"
+  status = 200
+
 [[redirects]]
   from = "/*"
   to = "/index.html"
