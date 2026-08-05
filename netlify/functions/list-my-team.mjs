@@ -3,6 +3,33 @@ import {
   listOrgMembers, getUserSettings, getLastSeenAt,
 } from "./_shared.mjs";
 
+// Full downline, not just direct reports -- BFS over the reportsTo pointers
+// already on each org-members record (no new store needed, reportsTo alone
+// is enough to derive an arbitrarily deep tree). depth=1 is a direct
+// report, depth=2 reports to one of those, etc., so the UI can indent.
+// visited-set guards against a cycle turning this into an infinite loop --
+// set-reports-to.mjs also rejects cycles at assignment time, but this stays
+// defensive in case one ever exists anyway.
+function buildDownline(members, rootUserId) {
+  const byManager = new Map();
+  for (const m of members) {
+    if (!m.reportsTo) continue;
+    if (!byManager.has(m.reportsTo)) byManager.set(m.reportsTo, []);
+    byManager.get(m.reportsTo).push(m);
+  }
+  const result = [];
+  const visited = new Set([rootUserId]);
+  const queue = (byManager.get(rootUserId) || []).map((m) => ({ member: m, depth: 1 }));
+  while (queue.length) {
+    const { member, depth } = queue.shift();
+    if (visited.has(member.userId)) continue;
+    visited.add(member.userId);
+    result.push({ member, depth });
+    for (const r of byManager.get(member.userId) || []) queue.push({ member: r, depth: depth + 1 });
+  }
+  return result;
+}
+
 // Roster-only, by design: name, email, licensed carriers, last-active --
 // never client profiles, conversations, or recommendations. A reporting
 // line is an organizational fact, not a data-sharing grant; every other
@@ -32,15 +59,15 @@ export default async function handler(req) {
   }
 
   if (!ctx.orgId) {
-    return new Response(JSON.stringify({ directReports: [], isOrgAdmin: false, orgRoster: null }), {
+    return new Response(JSON.stringify({ downline: [], isOrgAdmin: false, orgRoster: null }), {
       status: 200, headers: { ...CORS, "Content-Type": "application/json" },
     });
   }
 
   const members = await listOrgMembers(ctx.orgId);
   const isOrgAdmin = ctx.orgRole === "org:admin";
-  const directReportMembers = members.filter((m) => m.reportsTo === ctx.userId);
-  const rosterMembers = isOrgAdmin ? members : directReportMembers;
+  const downlineEntries = buildDownline(members, ctx.userId);
+  const rosterMembers = isOrgAdmin ? members : downlineEntries.map((e) => e.member);
 
   const enriched = await Promise.all(rosterMembers.map(enrich));
   const clerkUserById = new Map();
@@ -53,19 +80,22 @@ export default async function handler(req) {
     }
   } catch { /* Clerk lookups best-effort -- roster still shows without name/email */ }
 
-  const withIdentity = enriched.map((e) => {
+  const identityById = new Map(enriched.map((e) => {
     const cu = clerkUserById.get(e.userId);
-    return {
+    return [e.userId, {
       ...e,
       email: cu?.emailAddresses?.[0]?.emailAddress || null,
       name: cu ? [cu.firstName, cu.lastName].filter(Boolean).join(" ") || null : null,
-    };
-  });
+    }];
+  }));
 
-  const directReports = withIdentity.filter((m) => m.reportsTo === ctx.userId);
-  const orgRoster = isOrgAdmin ? withIdentity : null;
+  const downline = downlineEntries.map(({ member, depth }) => ({
+    ...identityById.get(member.userId),
+    depth,
+  }));
+  const orgRoster = isOrgAdmin ? [...identityById.values()] : null;
 
-  return new Response(JSON.stringify({ directReports, isOrgAdmin, orgRoster }), {
+  return new Response(JSON.stringify({ downline, isOrgAdmin, orgRoster }), {
     status: 200, headers: { ...CORS, "Content-Type": "application/json" },
   });
 }

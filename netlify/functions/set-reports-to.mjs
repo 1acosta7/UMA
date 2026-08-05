@@ -1,5 +1,25 @@
 import { CORS, jsonError, requireUserContext, loadOrgMember, upsertOrgMember } from "./_shared.mjs";
 
+// Walks UP the proposed manager's own reportsTo chain -- if targetUserId
+// shows up in it, assigning targetUserId -> proposedManagerId would close a
+// loop (e.g. A already reports to B, and this call tries to set B reports
+// to A). Now that My Team shows full multi-level downlines, a cycle
+// wouldn't just look wrong, it'd never terminate without the BFS's own
+// visited-set guard silently dropping part of the tree -- better to refuse
+// creating one than rely on that guard to paper over it.
+async function wouldCreateCycle(orgId, targetUserId, proposedManagerId) {
+  let current = proposedManagerId;
+  const seen = new Set();
+  while (current) {
+    if (current === targetUserId) return true;
+    if (seen.has(current)) return false; // pre-existing cycle upstream, not this call's problem
+    seen.add(current);
+    const m = await loadOrgMember(orgId, current);
+    current = m?.reportsTo || null;
+  }
+  return false;
+}
+
 // Assigning who reports to whom is org:admin-only, scoped strictly to the
 // caller's own currently-active org -- deliberately checked against
 // ctx.orgRole/ctx.orgId from the verified token, never a client-supplied
@@ -30,6 +50,9 @@ export default async function handler(req) {
   if (reportsTo) {
     const manager = await loadOrgMember(ctx.orgId, reportsTo);
     if (!manager) return jsonError(404, "reportsTo is not a member of your organization");
+    if (await wouldCreateCycle(ctx.orgId, targetUserId, reportsTo)) {
+      return jsonError(400, "That would create a reporting cycle");
+    }
   }
 
   const record = await upsertOrgMember(ctx.orgId, targetUserId, { reportsTo: reportsTo || null });
