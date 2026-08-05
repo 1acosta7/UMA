@@ -1,6 +1,6 @@
 import {
   CORS, jsonError, requireUserContext, getClerkClient,
-  listOrgMembers, getUserSettings, getLastSeenAt,
+  listOrgMembers, getUserSettings, getLastSeenAt, countClientProfilesForUser,
 } from "./_shared.mjs";
 
 // Full downline, not just direct reports -- BFS over the reportsTo pointers
@@ -30,12 +30,14 @@ function buildDownline(members, rootUserId) {
   return result;
 }
 
-// Roster-only, by design: name, email, licensed carriers, last-active --
-// never client profiles, conversations, or recommendations. A reporting
-// line is an organizational fact, not a data-sharing grant; every other
-// endpoint in this app still scopes strictly to the requesting agent's own
-// userId regardless of who reports to whom, so this stays the one place a
-// manager's view of their team lives.
+// Roster plus a bare client COUNT, never client data itself: name, email,
+// licensed carriers, last-active, and how many client profiles someone has
+// -- never a name, condition, or anything else about who those clients are.
+// A reporting line is an organizational fact, not a data-sharing grant;
+// every other endpoint in this app still scopes strictly to the requesting
+// agent's own userId regardless of who reports to whom, so this stays the
+// one place a manager's view of their team lives, and the count is the one
+// deliberate, bounded exception to "never client data."
 async function enrich(member) {
   const settings = await getUserSettings(member.userId);
   return {
@@ -44,6 +46,7 @@ async function enrich(member) {
     role: member.role,
     licensedCarriers: settings?.licensedCarriers || [],
     lastActiveAt: await getLastSeenAt(member.userId),
+    clientCount: await countClientProfilesForUser(member.userId),
   };
 }
 

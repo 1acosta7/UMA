@@ -405,6 +405,62 @@ export async function listAllOrgMembers() {
   }
 }
 
+// Self-serve team-building: any agent (not just org:admin) can hand out
+// this code so a colleague joins their org and lands under them in the
+// reporting tree automatically, with no admin step in between. Codes are
+// stored twice on purpose: on the org-members record itself (so a given
+// agent's code is stable and reused rather than minted fresh every time
+// they look at their own link) and in this separate store keyed by the
+// code (so accept-referral.mjs can resolve a bare code back to
+// {orgId, referringUserId} without knowing which org it belongs to
+// up front).
+function randomReferralCode() {
+  return Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 6);
+}
+
+export async function getOrCreateReferralCode(orgId, userId) {
+  const existing = await loadOrgMember(orgId, userId);
+  if (existing?.referralCode) return existing.referralCode;
+
+  const codeStore = getStore({ name: "referral-codes", consistency: "strong" });
+  let code;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = randomReferralCode();
+    const collision = await codeStore.get(candidate, { type: "text" }).catch(() => null);
+    if (!collision) { code = candidate; break; }
+  }
+  if (!code) code = randomReferralCode() + Date.now().toString(36); // pathological fallback, still effectively unique
+
+  await codeStore.set(code, JSON.stringify({ orgId, referringUserId: userId, createdAt: new Date().toISOString() }));
+  await upsertOrgMember(orgId, userId, { referralCode: code });
+  return code;
+}
+
+export async function resolveReferralCode(code) {
+  const codeStore = getStore({ name: "referral-codes", consistency: "strong" });
+  try {
+    const text = await codeStore.get(code, { type: "text" });
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+// Count only, never the underlying records -- this is what powers the "N
+// clients" figure a manager sees for someone on their team. Deliberately a
+// bare count (blobs.length off a prefix listing, not a read of any actual
+// client-profile content) so this can never leak a name, a condition, or
+// anything else about who those clients actually are.
+export async function countClientProfilesForUser(userId) {
+  const store = getStore({ name: "client-profiles", consistency: "strong" });
+  try {
+    const { blobs } = await store.list({ prefix: `${userId}/` });
+    return blobs.length;
+  } catch {
+    return 0;
+  }
+}
+
 export function conversationKey(userId, conversationId) {
   return `${userId}/${conversationId}`;
 }
