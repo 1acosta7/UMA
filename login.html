@@ -37,16 +37,32 @@ body { background: #0B1220; min-height: 100vh; display: flex; flex-direction: co
 // tab/window before landing back on app.html, and only localStorage
 // survives that) so app.html can pick it up and call accept-referral.mjs
 // once the person is actually authenticated, whether this was a brand-new
-// sign-up or an existing agent signing in. Never overwritten with nothing
-// -- if this load doesn't find a code, whatever's already stored from an
-// earlier visit is left alone rather than silently dropped.
+// sign-up or an existing agent signing in.
+//
+// Clerk's own SignIn component rewrites the URL when someone switches to
+// its "Sign up" view (e.g. to /sign-up) -- observed live: clicking that
+// link visibly changed the address bar. Since /:code in netlify.toml
+// matches ANY single path segment, that internal navigation would hit the
+// exact same redirect rule this referral link does, re-run this script,
+// and -- with the old logic -- silently overwrite a real stored code with
+// the bogus value "sign-up". Two guards against that now: a denylist of
+// Clerk's known internal routing segments, and never overwriting a code
+// that's already stored (the one that actually matters -- it means even an
+// internal path this list doesn't know about yet can't clobber a real one).
 (function() {
+  const CLERK_INTERNAL_PATHS = [
+    'login.html', 'index.html', 'app.html',
+    'sign-up', 'sign-in', 'factor-one', 'factor-two',
+    'verify-email-address', 'verify', 'reset-password', 'sso-callback',
+  ];
   let ref = new URLSearchParams(window.location.search).get('ref');
   if (!ref) {
     const path = window.location.pathname.replace(/^\/+|\/+$/g, '');
-    if (path && !['login.html', 'index.html', 'app.html'].includes(path)) ref = path;
+    if (path && !CLERK_INTERNAL_PATHS.includes(path)) ref = path;
   }
-  if (ref) localStorage.setItem('pendingReferralCode', ref);
+  if (ref && !localStorage.getItem('pendingReferralCode')) {
+    localStorage.setItem('pendingReferralCode', ref);
+  }
 })();
 
 window.addEventListener('load', async function() {
