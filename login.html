@@ -31,24 +31,22 @@ body { background: #0B1220; min-height: 100vh; display: flex; flex-direction: co
 // for /CODE but never updates window.location to the "to" target, so the
 // ?ref= query string in netlify.toml's redirect is invisible here; the
 // browser still sees the original path, which is exactly what falling back
-// to pathname picks up. Stashed in localStorage (not sessionStorage --
-// Clerk's sign-in/sign-up flow, or someone bouncing through "Back to home"
-// and clicking "Get Started Free" again, can plausibly involve a different
-// tab/window before landing back on app.html, and only localStorage
-// survives that) so app.html can pick it up and call accept-referral.mjs
-// once the person is actually authenticated, whether this was a brand-new
-// sign-up or an existing agent signing in.
+// to pathname picks up. Stashed in localStorage so app.html can pick it up
+// and call accept-referral.mjs once the person is actually authenticated,
+// whether this was a brand-new sign-up or an existing agent signing in.
 //
-// Clerk's own SignIn component rewrites the URL when someone switches to
-// its "Sign up" view (e.g. to /sign-up) -- observed live: clicking that
-// link visibly changed the address bar. Since /:code in netlify.toml
-// matches ANY single path segment, that internal navigation would hit the
-// exact same redirect rule this referral link does, re-run this script,
-// and -- with the old logic -- silently overwrite a real stored code with
-// the bogus value "sign-up". Two guards against that now: a denylist of
-// Clerk's known internal routing segments, and never overwriting a code
-// that's already stored (the one that actually matters -- it means even an
-// internal path this list doesn't know about yet can't clobber a real one).
+// CONFIRMED live (not just a guess): clicking "Sign up" from the default
+// sign-in view used to navigate to accounts.askuma.io -- Clerk's own
+// hosted Account Portal, a genuinely different origin -- because
+// mountSignIn had no signUpUrl telling it to stay on this domain. That's
+// a hard browser security boundary: localStorage set on askuma.io is
+// completely unreachable from accounts.askuma.io, so no amount of client
+// script here could have recovered the code once that cross-origin jump
+// happened. Fixed below by mounting SignUp directly on this same page
+// (toggled via ?view=sign-up) instead of ever letting Clerk fall back to
+// the Account Portal. The denylist/never-overwrite guards below are now
+// belt-and-suspenders for same-origin internal routing, not the primary
+// fix -- that's the mount change further down.
 (function() {
   const CLERK_INTERNAL_PATHS = [
     'login.html', 'index.html', 'app.html',
@@ -68,28 +66,44 @@ body { background: #0B1220; min-height: 100vh; display: flex; flex-direction: co
 window.addEventListener('load', async function() {
   try {
     await window.Clerk.load();
-    window.Clerk.mountSignIn(document.getElementById('sign-in'), {
-      appearance: {
-        variables: {
-          colorBackground: '#131F35',
-          colorInputBackground: '#1A2A45',
-          colorText: '#E8EDF5',
-          colorTextSecondary: '#8CA2C0',
-          colorPrimary: '#378ADD',
-          colorInputText: '#E8EDF5',
-          borderRadius: '8px'
-        },
-        elements: {
-          socialButtonsBlockButton: { display: 'none' },
-          socialButtonsBlockButtonText: { display: 'none' },
-          dividerRow: { display: 'none' }
-        }
+    const appearance = {
+      variables: {
+        colorBackground: '#131F35',
+        colorInputBackground: '#1A2A45',
+        colorText: '#E8EDF5',
+        colorTextSecondary: '#8CA2C0',
+        colorPrimary: '#378ADD',
+        colorInputText: '#E8EDF5',
+        borderRadius: '8px'
       },
+      elements: {
+        socialButtonsBlockButton: { display: 'none' },
+        socialButtonsBlockButtonText: { display: 'none' },
+        dividerRow: { display: 'none' }
+      }
+    };
+    const redirects = {
       afterSignInUrl: '/app.html',
       afterSignUpUrl: '/app.html',
       fallbackRedirectUrl: '/app.html',
       signUpFallbackRedirectUrl: '/app.html'
-    });
+    };
+    // Both views mounted on this same page/origin, toggled by ?view= --
+    // never let Clerk's own "Sign up"/"Sign in" links jump to the hosted
+    // Account Portal (a different origin, where the referral code stashed
+    // above would be unreachable). signUpUrl/signInUrl point each view's
+    // switch-link back here instead of Clerk's default.
+    if (new URLSearchParams(window.location.search).get('view') === 'sign-up') {
+      window.Clerk.mountSignUp(document.getElementById('sign-in'), {
+        appearance, ...redirects,
+        signInUrl: '/login.html'
+      });
+    } else {
+      window.Clerk.mountSignIn(document.getElementById('sign-in'), {
+        appearance, ...redirects,
+        signUpUrl: '/login.html?view=sign-up'
+      });
+    }
   } catch(e) {
     console.error('Clerk error:', e);
     document.getElementById('sign-in').innerHTML = '<p style="color:#E03328;text-align:center;font-size:14px">Authentication failed: ' + e.message + '</p>';
