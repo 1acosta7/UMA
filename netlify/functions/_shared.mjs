@@ -207,11 +207,22 @@ export const SLOT_LABELS = {
     fciul_ii: "FCIUL II Agent Guide (IUL)",
     foreign_nat: "Foreign National ITIN UW Guidelines",
   },
-  // Single all-in-one PDF covering underwriting guidelines for every
-  // American Amicable product, unlike the other carriers' split-by-topic
-  // documents -- one slot is correct here, not a gap to fill in later.
+  // One slot per product, not one all-in-one PDF -- the actual files are
+  // 12 separate per-product agent guides (confirmed against the real
+  // files), same split-by-product structure as the other carriers.
   american_amicable: {
-    uw_guide: "Underwriting Guidelines (All Products)",
+    easy_term: "Easy Term Agent Guide",
+    express_ul: "Express UL Agent Guide",
+    family_choice: "Family Choice Agent Guide",
+    family_solution: "Family Solution Agent Guide",
+    home_protector: "Home Protector Agent Guide",
+    intelligent_choice: "Intelligent Choice Agent Guide",
+    safecare_term: "SafeCare Term Agent Guide",
+    securelife_plus: "SecureLife Plus Agent Guide",
+    security_protector: "Security Protector Agent Guide",
+    senior_choice: "Senior Choice Agent Guide",
+    survivor_protector: "Survivor Protector Agent Guide",
+    term_made_simple: "Term Made Simple Agent Guide",
   },
 };
 
