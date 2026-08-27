@@ -169,8 +169,8 @@ export function looksLikePdf(bytes) {
   return bytes.length > 5 && String.fromCharCode(...bytes.slice(0, 5)) === "%PDF-";
 }
 
-export const CARRIERS = ["fg", "foresters", "allianz", "transamerica"];
-export const CARRIER_NAMES = { fg: "F&G", foresters: "Foresters", allianz: "Allianz", transamerica: "Transamerica" };
+export const CARRIERS = ["fg", "foresters", "allianz", "transamerica", "american_amicable"];
+export const CARRIER_NAMES = { fg: "F&G", foresters: "Foresters", allianz: "Allianz", transamerica: "Transamerica", american_amicable: "American Amicable" };
 
 export const SLOT_LABELS = {
   fg: {
@@ -206,6 +206,12 @@ export const SLOT_LABELS = {
     ffiul_ii: "FFIUL II Express Agent & UW Guide (IUL)",
     fciul_ii: "FCIUL II Agent Guide (IUL)",
     foreign_nat: "Foreign National ITIN UW Guidelines",
+  },
+  // Single all-in-one PDF covering underwriting guidelines for every
+  // American Amicable product, unlike the other carriers' split-by-topic
+  // documents -- one slot is correct here, not a gap to fill in later.
+  american_amicable: {
+    uw_guide: "Underwriting Guidelines (All Products)",
   },
 };
 
