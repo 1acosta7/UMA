@@ -341,6 +341,202 @@ const FG_NATIONAL_GUARD_BUILD_CHART = [
   { heightIn: 84, minWeight: 176, maxWeight: 415 },
 ];
 
+// --- American Amicable build charts ---------------------------------------
+// All 12 Agent Guides checked for a build/BMI chart (2026-08-26). 11 of 12
+// have one; Express UL has none (only a condition-based Medical Impairment
+// Guide -- deliberately no variant for it below, same as F&G's general-case
+// gap). Every chart reduces to the two kinds already used elsewhere in this
+// file (height_weight_tiered / height_weight_minmax) -- no new classify
+// logic needed. For the tiered charts below, a weight above every listed
+// class's max lands in classifyHeightWeightTiered's generic "above table
+// range" fallback, which matches each chart's own "not eligible for
+// coverage" footnote. None of these charts' minimum-weight columns are
+// enforced by height_weight_tiered, consistent with the existing Allianz/
+// PlanRight/Foresters-Fully-UW variants above (same function, same known
+// scope limit) -- the minimums are preserved in the data as source-fidelity
+// documentation even though unused.
+
+// Family A -- Height | Minimum Weight | Max Weight (Table 2) | Max Weight
+// (Table 4). Byte-identical across Easy Term, Home Protector, SafeCare Term,
+// Survivor Protector, and Term Made Simple; Intelligent Choice has the same
+// values but its own table stops at 6'6" (see the capped slice below).
+// "Table 2"/"Table 4" per the source footnote: exceeding Table 4 is a
+// build-alone decline; between Table 2 and Table 4 is only a decline if
+// combined with a rated medical condition (which this cross-check can't
+// evaluate, so it's reported as individual-consideration territory, not an
+// outright decline).
+const AA_FAMILY_A_BUILD_CHART = [
+  { heightIn: 58, minWeight: 86, table2Max: 182, table4Max: 199 },
+  { heightIn: 59, minWeight: 88, table2Max: 188, table4Max: 205 },
+  { heightIn: 60, minWeight: 90, table2Max: 195, table4Max: 212 },
+  { heightIn: 61, minWeight: 93, table2Max: 201, table4Max: 220 },
+  { heightIn: 62, minWeight: 95, table2Max: 208, table4Max: 227 },
+  { heightIn: 63, minWeight: 99, table2Max: 215, table4Max: 234 },
+  { heightIn: 64, minWeight: 101, table2Max: 221, table4Max: 242 },
+  { heightIn: 65, minWeight: 104, table2Max: 228, table4Max: 249 },
+  { heightIn: 66, minWeight: 106, table2Max: 235, table4Max: 257 },
+  { heightIn: 67, minWeight: 110, table2Max: 243, table4Max: 265 },
+  { heightIn: 68, minWeight: 113, table2Max: 250, table4Max: 273 },
+  { heightIn: 69, minWeight: 117, table2Max: 257, table4Max: 281 },
+  { heightIn: 70, minWeight: 120, table2Max: 265, table4Max: 289 },
+  { heightIn: 71, minWeight: 125, table2Max: 272, table4Max: 298 },
+  { heightIn: 72, minWeight: 129, table2Max: 280, table4Max: 306 },
+  { heightIn: 73, minWeight: 133, table2Max: 288, table4Max: 315 },
+  { heightIn: 74, minWeight: 136, table2Max: 296, table4Max: 323 },
+  { heightIn: 75, minWeight: 140, table2Max: 304, table4Max: 332 },
+  { heightIn: 76, minWeight: 143, table2Max: 312, table4Max: 341 },
+  { heightIn: 77, minWeight: 146, table2Max: 320, table4Max: 350 },
+  { heightIn: 78, minWeight: 149, table2Max: 329, table4Max: 359 },
+  { heightIn: 79, minWeight: 153, table2Max: 337, table4Max: 368 },
+  { heightIn: 80, minWeight: 157, table2Max: 346, table4Max: 378 },
+  { heightIn: 81, minWeight: 160, table2Max: 355, table4Max: 387 },
+];
+const AA_FAMILY_A_CLASS_FIELDS = [
+  { field: "table2Max", label: "within Table 2 (build alone does not decline; combined with a rated medical condition it may still be declined)" },
+  { field: "table4Max", label: "between Table 2 and Table 4 (individual consideration for any combined medical condition)" },
+];
+// Intelligent Choice's own table stops at 6'6" (78in) -- using the shared
+// array above but sliced, so a client above 6'6" correctly falls through to
+// "no_carrier_data" for this product instead of silently borrowing rows the
+// source doesn't actually cover.
+const AA_FAMILY_A_BUILD_CHART_CAPPED_6_6 = AA_FAMILY_A_BUILD_CHART.filter((r) => r.heightIn <= 78);
+
+// Family B -- Height | Max Weight (Immediate DB) | Max Weight (ROP, range) |
+// Min Weight (Immediate DB) | Min Weight (ROP, range). Byte-identical across
+// Family Choice and Family Solution. Immediate Death Benefit is the base
+// plan; weight in the ROP (Return of Premium) range still qualifies for a
+// graded ROP-only plan; above the ROP range's top or below its bottom is not
+// eligible for coverage.
+const AA_FAMILY_B_ADULT_BUILD_CHART = [
+  { heightIn: 58, minWeight: 92, minRopLow: 87, immediateMax: 211, ropMax: 230 },
+  { heightIn: 59, minWeight: 94, minRopLow: 89, immediateMax: 218, ropMax: 238 },
+  { heightIn: 60, minWeight: 96, minRopLow: 91, immediateMax: 225, ropMax: 246 },
+  { heightIn: 61, minWeight: 99, minRopLow: 94, immediateMax: 233, ropMax: 254 },
+  { heightIn: 62, minWeight: 101, minRopLow: 96, immediateMax: 241, ropMax: 262 },
+  { heightIn: 63, minWeight: 105, minRopLow: 100, immediateMax: 248, ropMax: 271 },
+  { heightIn: 64, minWeight: 107, minRopLow: 102, immediateMax: 256, ropMax: 280 },
+  { heightIn: 65, minWeight: 110, minRopLow: 105, immediateMax: 264, ropMax: 288 },
+  { heightIn: 66, minWeight: 112, minRopLow: 107, immediateMax: 273, ropMax: 297 },
+  { heightIn: 67, minWeight: 116, minRopLow: 111, immediateMax: 281, ropMax: 306 },
+  { heightIn: 68, minWeight: 119, minRopLow: 114, immediateMax: 289, ropMax: 316 },
+  { heightIn: 69, minWeight: 123, minRopLow: 118, immediateMax: 298, ropMax: 325 },
+  { heightIn: 70, minWeight: 126, minRopLow: 121, immediateMax: 307, ropMax: 335 },
+  { heightIn: 71, minWeight: 131, minRopLow: 126, immediateMax: 315, ropMax: 344 },
+  { heightIn: 72, minWeight: 135, minRopLow: 130, immediateMax: 324, ropMax: 354 },
+  { heightIn: 73, minWeight: 139, minRopLow: 134, immediateMax: 334, ropMax: 364 },
+  { heightIn: 74, minWeight: 142, minRopLow: 137, immediateMax: 343, ropMax: 374 },
+  { heightIn: 75, minWeight: 146, minRopLow: 141, immediateMax: 352, ropMax: 384 },
+  { heightIn: 76, minWeight: 149, minRopLow: 144, immediateMax: 361, ropMax: 394 },
+];
+const AA_FAMILY_B_CLASS_FIELDS = [
+  { field: "immediateMax", label: "Immediate Death Benefit" },
+  { field: "ropMax", label: "Return of Premium (graded) only" },
+];
+
+// Security Protector -- Height | Maximum Weight | Minimum Weight, p.15.
+// Same Immediate-DB numbers as Family B above but this product has no ROP
+// variant, so it's its own plain min/max chart per the source ("Any weight
+// above maximum or below minimum will be a decline for the plan.").
+const AA_SECURITY_PROTECTOR_BUILD_CHART = [
+  { heightIn: 58, minWeight: 92, maxWeight: 211 },
+  { heightIn: 59, minWeight: 94, maxWeight: 218 },
+  { heightIn: 60, minWeight: 96, maxWeight: 225 },
+  { heightIn: 61, minWeight: 99, maxWeight: 233 },
+  { heightIn: 62, minWeight: 101, maxWeight: 241 },
+  { heightIn: 63, minWeight: 105, maxWeight: 248 },
+  { heightIn: 64, minWeight: 107, maxWeight: 256 },
+  { heightIn: 65, minWeight: 110, maxWeight: 264 },
+  { heightIn: 66, minWeight: 112, maxWeight: 273 },
+  { heightIn: 67, minWeight: 116, maxWeight: 281 },
+  { heightIn: 68, minWeight: 119, maxWeight: 289 },
+  { heightIn: 69, minWeight: 123, maxWeight: 298 },
+  { heightIn: 70, minWeight: 126, maxWeight: 307 },
+  { heightIn: 71, minWeight: 131, maxWeight: 315 },
+  { heightIn: 72, minWeight: 135, maxWeight: 324 },
+  { heightIn: 73, minWeight: 139, maxWeight: 334 },
+  { heightIn: 74, minWeight: 142, maxWeight: 343 },
+  { heightIn: 75, minWeight: 146, maxWeight: 352 },
+  { heightIn: 76, minWeight: 149, maxWeight: 361 },
+];
+
+// SecureLife Plus -- Height | Preferred | Standard, p.15. Two-tier UL-style
+// chart, no minimum weight given in the source.
+const AA_SECURELIFE_PLUS_BUILD_CHART = [
+  { heightIn: 56, preferredMax: 144, standardMax: 161 },
+  { heightIn: 57, preferredMax: 149, standardMax: 166 },
+  { heightIn: 58, preferredMax: 154, standardMax: 172 },
+  { heightIn: 59, preferredMax: 160, standardMax: 178 },
+  { heightIn: 60, preferredMax: 165, standardMax: 184 },
+  { heightIn: 61, preferredMax: 171, standardMax: 191 },
+  { heightIn: 62, preferredMax: 177, standardMax: 197 },
+  { heightIn: 63, preferredMax: 182, standardMax: 203 },
+  { heightIn: 64, preferredMax: 188, standardMax: 210 },
+  { heightIn: 65, preferredMax: 194, standardMax: 216 },
+  { heightIn: 66, preferredMax: 200, standardMax: 223 },
+  { heightIn: 67, preferredMax: 206, standardMax: 230 },
+  { heightIn: 68, preferredMax: 212, standardMax: 237 },
+  { heightIn: 69, preferredMax: 219, standardMax: 244 },
+  { heightIn: 70, preferredMax: 225, standardMax: 251 },
+  { heightIn: 71, preferredMax: 231, standardMax: 258 },
+  { heightIn: 72, preferredMax: 238, standardMax: 265 },
+  { heightIn: 73, preferredMax: 245, standardMax: 273 },
+  { heightIn: 74, preferredMax: 251, standardMax: 280 },
+  { heightIn: 75, preferredMax: 258, standardMax: 288 },
+  { heightIn: 76, preferredMax: 265, standardMax: 296 },
+  { heightIn: 77, preferredMax: 272, standardMax: 304 },
+  { heightIn: 78, preferredMax: 279, standardMax: 312 },
+  { heightIn: 79, preferredMax: 287, standardMax: 320 },
+];
+const AA_SECURELIFE_PLUS_CLASS_FIELDS = [
+  { field: "preferredMax", label: "Preferred" },
+  { field: "standardMax", label: "Standard" },
+];
+
+// Senior Choice -- Ht. | Max Weight Immediate | Max Weight Graded | Max
+// Weight ROP (range) | Min Weight Immediate | Min Weight ROP (range), p.16.
+// Three ascending tiers on the high end (Immediate/Graded/ROP); the low-end
+// minimum columns are preserved as source-fidelity documentation but not
+// enforced, same scope limit as the other tiered charts in this file. Rows
+// for 4'5"-4'7" carry the source's own footnote that those heights aren't
+// programmed in the mobile app decision engine and generate a Refer to Home
+// Office decision instead of an automated one.
+const AA_SENIOR_CHOICE_BUILD_CHART = [
+  { heightIn: 53, minWeight: 82, minRopLow: 77, immediateMax: 173, gradedMax: 180, ropMax: 190, refHomeOffice: true },
+  { heightIn: 54, minWeight: 84, minRopLow: 79, immediateMax: 180, gradedMax: 188, ropMax: 198, refHomeOffice: true },
+  { heightIn: 55, minWeight: 86, minRopLow: 81, immediateMax: 187, gradedMax: 196, ropMax: 206, refHomeOffice: true },
+  { heightIn: 56, minWeight: 88, minRopLow: 83, immediateMax: 197, gradedMax: 204, ropMax: 214 },
+  { heightIn: 57, minWeight: 90, minRopLow: 85, immediateMax: 204, gradedMax: 212, ropMax: 222 },
+  { heightIn: 58, minWeight: 92, minRopLow: 87, immediateMax: 211, gradedMax: 220, ropMax: 230 },
+  { heightIn: 59, minWeight: 94, minRopLow: 89, immediateMax: 218, gradedMax: 228, ropMax: 238 },
+  { heightIn: 60, minWeight: 96, minRopLow: 91, immediateMax: 225, gradedMax: 236, ropMax: 246 },
+  { heightIn: 61, minWeight: 99, minRopLow: 94, immediateMax: 233, gradedMax: 244, ropMax: 254 },
+  { heightIn: 62, minWeight: 101, minRopLow: 96, immediateMax: 241, gradedMax: 252, ropMax: 262 },
+  { heightIn: 63, minWeight: 105, minRopLow: 100, immediateMax: 248, gradedMax: 260, ropMax: 271 },
+  { heightIn: 64, minWeight: 107, minRopLow: 102, immediateMax: 256, gradedMax: 268, ropMax: 280 },
+  { heightIn: 65, minWeight: 110, minRopLow: 105, immediateMax: 264, gradedMax: 276, ropMax: 288 },
+  { heightIn: 66, minWeight: 112, minRopLow: 107, immediateMax: 273, gradedMax: 285, ropMax: 297 },
+  { heightIn: 67, minWeight: 116, minRopLow: 111, immediateMax: 281, gradedMax: 294, ropMax: 306 },
+  { heightIn: 68, minWeight: 119, minRopLow: 114, immediateMax: 289, gradedMax: 303, ropMax: 316 },
+  { heightIn: 69, minWeight: 123, minRopLow: 118, immediateMax: 298, gradedMax: 312, ropMax: 325 },
+  { heightIn: 70, minWeight: 126, minRopLow: 121, immediateMax: 307, gradedMax: 321, ropMax: 335 },
+  { heightIn: 71, minWeight: 131, minRopLow: 126, immediateMax: 315, gradedMax: 330, ropMax: 344 },
+  { heightIn: 72, minWeight: 135, minRopLow: 130, immediateMax: 324, gradedMax: 339, ropMax: 354 },
+  { heightIn: 73, minWeight: 139, minRopLow: 134, immediateMax: 334, gradedMax: 349, ropMax: 364 },
+  { heightIn: 74, minWeight: 142, minRopLow: 137, immediateMax: 343, gradedMax: 359, ropMax: 374 },
+  { heightIn: 75, minWeight: 146, minRopLow: 141, immediateMax: 352, gradedMax: 368, ropMax: 384 },
+  { heightIn: 76, minWeight: 149, minRopLow: 144, immediateMax: 361, gradedMax: 378, ropMax: 394 },
+  { heightIn: 77, minWeight: 152, minRopLow: 147, immediateMax: 370, gradedMax: 388, ropMax: 404 },
+  { heightIn: 78, minWeight: 156, minRopLow: 151, immediateMax: 379, gradedMax: 398, ropMax: 414 },
+  { heightIn: 79, minWeight: 160, minRopLow: 155, immediateMax: 388, gradedMax: 408, ropMax: 424 },
+  { heightIn: 80, minWeight: 164, minRopLow: 159, immediateMax: 397, gradedMax: 418, ropMax: 434 },
+  { heightIn: 81, minWeight: 168, minRopLow: 162, immediateMax: 406, gradedMax: 428, ropMax: 440 },
+];
+const AA_SENIOR_CHOICE_CLASS_FIELDS = [
+  { field: "immediateMax", label: "Immediate Death Benefit" },
+  { field: "gradedMax", label: "Graded Death Benefit" },
+  { field: "ropMax", label: "Return of Premium (graded) only" },
+];
+
 export const NUMERIC_LOOKUP = {
   transamerica: {
     build: {
@@ -445,6 +641,33 @@ export const NUMERIC_LOOKUP = {
     },
     a1c: { available: false, note: "F&G's diabetes rating (ADV5544) is banded by age + duration, qualitative 'well controlled' -- no numeric A1C cutoff appears in the ingested document." },
     psa: { available: false, note: "No PSA/prostate numeric threshold found in the ingested F&G documents." },
+  },
+  american_amicable: {
+    build: {
+      available: true,
+      noVariantNote: "American Amicable has a distinct build chart per product, and Express UL's own Agent Guide has no numeric build/BMI chart at all (only a condition-based Medical Impairment Guide) -- the recommended product wasn't specific enough, or was Express UL, to select the right chart.",
+      variants: [
+        { id: "easy_term", label: "Easy Term Build Chart", matchKeywords: ["easy term"], kind: "height_weight_tiered", sourceDocId: "american_amicable_easy_term", sourcePage: 20, data: AA_FAMILY_A_BUILD_CHART, classFields: AA_FAMILY_A_CLASS_FIELDS },
+        { id: "home_protector", label: "Home Protector Build Chart", matchKeywords: ["home protector"], kind: "height_weight_tiered", sourceDocId: "american_amicable_home_protector", sourcePage: 20, data: AA_FAMILY_A_BUILD_CHART, classFields: AA_FAMILY_A_CLASS_FIELDS },
+        { id: "safecare_term", label: "SafeCare Term Build Chart", matchKeywords: ["safecare term"], kind: "height_weight_tiered", sourceDocId: "american_amicable_safecare_term", sourcePage: 15, data: AA_FAMILY_A_BUILD_CHART, classFields: AA_FAMILY_A_CLASS_FIELDS },
+        { id: "survivor_protector", label: "Survivor Protector Build Chart", matchKeywords: ["survivor protector"], kind: "height_weight_tiered", sourceDocId: "american_amicable_survivor_protector", sourcePage: 18, data: AA_FAMILY_A_BUILD_CHART, classFields: AA_FAMILY_A_CLASS_FIELDS },
+        { id: "term_made_simple", label: "Term Made Simple Build Chart", matchKeywords: ["term made simple"], kind: "height_weight_tiered", sourceDocId: "american_amicable_term_made_simple", sourcePage: 14, data: AA_FAMILY_A_BUILD_CHART, classFields: AA_FAMILY_A_CLASS_FIELDS },
+        { id: "intelligent_choice", label: "Intelligent Choice Build Chart", matchKeywords: ["intelligent choice"], kind: "height_weight_tiered", sourceDocId: "american_amicable_intelligent_choice", sourcePage: 18, data: AA_FAMILY_A_BUILD_CHART_CAPPED_6_6, classFields: AA_FAMILY_A_CLASS_FIELDS },
+        { id: "family_choice", label: "Family Choice Adult Build Chart", matchKeywords: ["family choice"], kind: "height_weight_tiered", sourceDocId: "american_amicable_family_choice", sourcePage: 11, data: AA_FAMILY_B_ADULT_BUILD_CHART, classFields: AA_FAMILY_B_CLASS_FIELDS },
+        { id: "family_solution", label: "Family Solution Adult Build Chart", matchKeywords: ["family solution"], kind: "height_weight_tiered", sourceDocId: "american_amicable_family_solution", sourcePage: 11, data: AA_FAMILY_B_ADULT_BUILD_CHART, classFields: AA_FAMILY_B_CLASS_FIELDS },
+        { id: "security_protector", label: "Security Protector Build Chart", matchKeywords: ["security protector"], kind: "height_weight_minmax", sourceDocId: "american_amicable_security_protector", sourcePage: 15, data: AA_SECURITY_PROTECTOR_BUILD_CHART },
+        { id: "securelife_plus", label: "SecureLife Plus Build Chart", matchKeywords: ["securelife plus", "secure life plus"], kind: "height_weight_tiered", sourceDocId: "american_amicable_securelife_plus", sourcePage: 15, data: AA_SECURELIFE_PLUS_BUILD_CHART, classFields: AA_SECURELIFE_PLUS_CLASS_FIELDS },
+        { id: "senior_choice", label: "Senior Choice Build Chart", matchKeywords: ["senior choice"], kind: "height_weight_tiered", sourceDocId: "american_amicable_senior_choice", sourcePage: 16, data: AA_SENIOR_CHOICE_BUILD_CHART, classFields: AA_SENIOR_CHOICE_CLASS_FIELDS },
+        // Deliberately no variant for Express UL -- its Agent Guide has no
+        // build/BMI chart at all (confirmed via a full 40-page keyword scan),
+        // only a condition-based Medical Impairment Guide. No isDefault
+        // either, same reasoning as F&G's general-case gap above: a generic/
+        // unspecified American Amicable product should stay unavailable
+        // rather than silently borrowing another product's chart.
+      ],
+    },
+    a1c: { available: false, note: "No numeric A1C/diabetes threshold was identified while reviewing these guides for build/BMI charts; a dedicated diabetes-specific scan of the full American Amicable document set has not been performed." },
+    psa: { available: false, note: "No numeric PSA/prostate threshold was identified while reviewing these guides for build/BMI charts; a dedicated PSA-specific scan of the full American Amicable document set has not been performed." },
   },
 };
 
